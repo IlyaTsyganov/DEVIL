@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\devil.ico</ApplicationIcon>
+    <AssemblyName>DEViL</AssemblyName>
+    <RootNamespace>Devil</RootNamespace>
+    <PlatformTarget>x64</PlatformTarget>
+  </PropertyGroup>
+  <ItemGroup>
+    <Content Include="Assets\devil.ico"
+             CopyToOutputDirectory="PreserveNewest"
+             TargetPath="Assets\devil.ico" />
+    <Content Include="Assets\fonts\*.ttf"
+             CopyToOutputDirectory="PreserveNewest"
+             TargetPath="Assets\fonts\%(Filename)%(Extension)" />
+    <Content Include="Native\CollisionViewer\bin\DoomCollisionLayer.dll"
+             Condition="Exists('Native\CollisionViewer\bin\DoomCollisionLayer.dll')"
+             CopyToOutputDirectory="PreserveNewest"
+             TargetPath="Native\CollisionViewer\bin\DoomCollisionLayer.dll" />
+  </ItemGroup>
+</Project>
