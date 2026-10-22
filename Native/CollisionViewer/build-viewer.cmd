@@ -13,7 +13,7 @@ if not defined VCVARS (
 )
 call "%VCVARS%" >nul
 if errorlevel 1 exit /b 1
-set "VULKAN_HEADERS=..\..\..\third_party\Vulkan-Headers\include"
+set "VULKAN_HEADERS=..\..\third_party\Vulkan-Headers\include"
 if not exist "%VULKAN_HEADERS%\vulkan\vulkan.h" (
   echo Vulkan-Headers must be available in the repository at third_party\Vulkan-Headers.
   exit /b 1

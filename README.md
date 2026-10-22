@@ -16,7 +16,7 @@ DEViL is an unofficial community tool. It does not modify the game installation 
 
 ## Download and run
 
-Download [DEViL for Windows x64](releases/DEViL-standalone-2026-10-21.zip), extract the archive, and run `DEViL.exe`. Keep the included files and folders together. The package requires the **.NET 10 Desktop Runtime**.
+Download [DEViL for Windows x64](https://github.com/IlyaTsyganov/DEVIL/releases/download/2026-10-21/DEViL-standalone-2026-10-21.zip), extract the archive, and run `DEViL.exe`. Keep the included files and folders together. The package requires the **.NET 10 Desktop Runtime**.
 
 In the application, select `DOOMEternalx64vk.exe`, enable Collision Viewer, choose the geometry and rendering options, then launch the game. Changes to the viewer setting take effect on the next game launch. DEViL supports the verified DOOM Eternal 1.1 executable profile only.
 
@@ -27,11 +27,13 @@ Requirements: Windows x64, Visual Studio Build Tools with the C++ workload, and 
 From the repository root, build the native viewer and then publish the Windows application:
 
 ```powershell
-cmd /c .\StandaloneApp\Native\CollisionViewer\build-viewer.cmd
-dotnet publish .\StandaloneApp\DEViL.csproj -c Release -o .\publish
+cmd /c .\Native\CollisionViewer\build-viewer.cmd
+dotnet publish .\DEViL.csproj -c Release -o .\publish
 ```
 
-The native source, tests, shaders, and third-party notices are under `StandaloneApp/Native/CollisionViewer/`. Vulkan-Headers and their license files are included under `third_party/Vulkan-Headers/`.
+The Windows application source is organized at the repository root. Native source, tests, shaders, and third-party notices are under `Native/CollisionViewer/`. Vulkan-Headers and their license files are included under `third_party/Vulkan-Headers/`.
+
+The native build creates `ViewerBehaviorTests.exe`, `DepthTrackerTests.exe`, and `LayerLoaderProbe.exe` under `Native/CollisionViewer/bin/`. Run the first two to check the viewer behavior and depth tracking. The loader probe accepts the path to a Vulkan layer runtime directory as its argument.
 
 ## Safety and limitations
 
