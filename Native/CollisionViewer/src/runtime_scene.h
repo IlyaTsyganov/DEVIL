@@ -24,7 +24,7 @@ struct RuntimeScene {
     std::vector<Mesh> meshes;
     std::vector<SpatialNode> nodes;
     std::vector<uint32_t> order;
-    uint32_t unique=0,unsupported=0;
+    uint32_t unique=0,unsupported=0,nonBlocking=0;
     uint64_t triangles=0;
     double milliseconds=0;
 };
@@ -35,6 +35,7 @@ struct RuntimeSceneBuilder {
     std::unordered_map<uintptr_t,Cached> cache;
     std::unordered_map<uint8_t,uint32_t> unsupportedTypes;
     std::unordered_map<std::string,uint32_t> errors;
+    ShapeContentsFilter contents;
     bool failed=false;
     bool walk(uintptr_t address,const WallTransform& transform,RuntimeScene& scene,unsigned depth=0) {
         if(cancelled()) return false;
@@ -67,11 +68,12 @@ struct RuntimeSceneBuilder {
             }
             return true;
         }
+        if(!contents.allowsShape(address)) { ++scene.nonBlocking; return true; }
         auto found=cache.find(address);
         if(found==cache.end()) {
             LiveWalls decoder; decoder.memory=memory;
             auto geometry=std::make_shared<Geometry>(); geometry->kind=1;
-            bool decoded=decoder.shape(address,WallTransform{},*geometry);
+            bool decoded=decoder.shape(address,WallTransform{},*geometry,0,&contents);
             if(decoded&&geometry->triangles.empty()) { ++errors["empty shape"]; return true; }
             if(!decoded) {
                 ++scene.unsupported; ++unsupportedTypes[header[0x22]]; ++errors[decoder.shapeError]; return true;
@@ -98,7 +100,7 @@ struct RuntimeSceneBuilder {
     std::shared_ptr<RuntimeScene> build(const LevelIdentity& level) {
         auto start=std::chrono::steady_clock::now();
         auto scene=std::make_shared<RuntimeScene>(); scene->level=level;
-        cache.clear(); unsupportedTypes.clear(); errors.clear(); failed=false;
+        cache.clear(); unsupportedTypes.clear(); errors.clear(); contents.memory=memory; contents.clear(); failed=false;
         if(!walk(level.world,WallTransform{},*scene)||failed||cancelled()) return {};
         scene->unique=static_cast<uint32_t>(cache.size()); cache.clear();
         scene->order.resize(scene->meshes.size()); std::iota(scene->order.begin(),scene->order.end(),0u);
@@ -213,7 +215,7 @@ static bool updateRuntimeScene() {
     bool hadWorld=bool(runtimeWorld);
     runtimeManager.snapshot(level,runtimeWorld,runtimeEntities);
     if(!hadWorld&&runtimeWorld) {
-        char message[800]; sprintf_s(message,"Runtime scene ready: %s, %zu collision instances, %u unique geometries, %llu triangles, unsupported=%u, background build=%.1fms.",level.name.c_str(),runtimeWorld->meshes.size(),runtimeWorld->unique,runtimeWorld->triangles,runtimeWorld->unsupported,runtimeWorld->milliseconds); note(message);
+        char message[800]; sprintf_s(message,"Runtime scene ready: %s, %zu player-blocking collision instances, %u unique geometries, %llu triangles, filtered non-blocking=%u, unsupported=%u, background build=%.1fms.",level.name.c_str(),runtimeWorld->meshes.size(),runtimeWorld->unique,runtimeWorld->triangles,runtimeWorld->nonBlocking,runtimeWorld->unsupported,runtimeWorld->milliseconds); note(message);
     }
     static ULONGLONG lastEntities=0;
     if(runtimeEntities&&GetTickCount64()-lastEntities>5000) {

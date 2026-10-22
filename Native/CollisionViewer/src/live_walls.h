@@ -14,6 +14,54 @@ struct WallMemory {
     }
     template<class T> bool get(uintptr_t address,T& value) const { return read(address,&value,sizeof(value)); }
 };
+// DOOM stores gameplay contents beside each Havok shape in an engine-owned
+// idHavokShape table. Validate the owner chain before using those flags.
+struct ShapeContentsFilter {
+    static constexpr uintptr_t shapeUserData=0x30, tableList=0x08, tableCount=0x10;
+    static constexpr size_t entrySize=0x58;
+    static constexpr uint32_t solid=0x1, playerClip=0x8, noCollision=0x40000000;
+    struct Table { uintptr_t data=0; std::vector<uint32_t> contents; };
+    WallMemory memory;
+    std::unordered_map<uintptr_t,Table> tables;
+    void clear() { tables.clear(); }
+    static bool blocksPlayer(uint32_t flags) {
+        return (flags&(solid|playerClip))!=0&&!(flags&noCollision);
+    }
+    const Table* lookup(uintptr_t shape,size_t& index) {
+        uintptr_t entry=0,wrapper=0;
+        if(!memory.get(shape+shapeUserData,entry)||!memory.get(entry,wrapper)||!wrapper) return nullptr;
+        auto found=tables.find(wrapper);
+        if(found==tables.end()) {
+            Table table; uint32_t count=0;
+            if(memory.get(wrapper+tableList,table.data)&&memory.get(wrapper+tableCount,count)&&count&&count<=100000&&
+               table.data&&entry>=table.data&&(entry-table.data)%entrySize==0&&(entry-table.data)/entrySize<count) {
+                std::vector<unsigned char> rows(size_t(count)*entrySize);
+                if(memory.read(table.data,rows.data(),rows.size())) {
+                    table.contents.reserve(count);
+                    for(size_t i=0;i<count;++i) {
+                        uintptr_t owner=0; uint32_t flags=0;
+                        memcpy(&owner,rows.data()+i*entrySize,8);
+                        if(owner!=wrapper) { table.contents.clear(); break; }
+                        memcpy(&flags,rows.data()+i*entrySize+8,4); table.contents.push_back(flags);
+                    }
+                }
+            }
+            found=tables.emplace(wrapper,std::move(table)).first;
+        }
+        const Table& table=found->second;
+        if(entry<table.data||(entry-table.data)%entrySize) return nullptr;
+        index=(entry-table.data)/entrySize;
+        return index<table.contents.size()?&table:nullptr;
+    }
+    bool allowsShape(uintptr_t shape) {
+        size_t index=0; const Table* table=lookup(shape,index);
+        return !table||blocksPlayer(table->contents[index]);
+    }
+    bool allowsTag(uintptr_t shape,uint16_t tag) {
+        size_t index=0; const Table* table=lookup(shape,index);
+        return !table||tag==0xffff||tag>=table->contents.size()||blocksPlayer(table->contents[tag]);
+    }
+};
 struct WallTransform {
     float m[12]{1,0,0,0,0,1,0,0,0,0,1,0};
     Vec3 apply(Vec3 p) const { return {m[0]*p.x+m[1]*p.y+m[2]*p.z+m[3],m[4]*p.x+m[5]*p.y+m[6]*p.z+m[7],m[8]*p.x+m[9]*p.y+m[10]*p.z+m[11]}; }
@@ -44,18 +92,20 @@ struct LiveWalls {
         if(!memory.get(address,data)||!memory.get(address+8,count)||count>limit) return false;
         output.resize(count); return !count||memory.read(data,output.data(),size_t(count)*sizeof(T));
     }
-    bool compressed(uintptr_t address,const WallTransform& transform,Geometry& geometry) {
+    bool compressed(uintptr_t address,const WallTransform& transform,Geometry& geometry,ShapeContentsFilter* contents=nullptr) {
         uintptr_t data=0;
         if(!memory.get(address+0x50,data)) return shapeFailure("compressed data pointer");
         uintptr_t tree=data+0x20;
-        float domain[8]{};
+        float domain[8]{}; bool haveTags=false;
         std::vector<std::array<unsigned char,96>> sections;
         std::vector<std::array<unsigned char,4>> primitives;
         std::vector<uint16_t> sharedIndices;
         std::vector<uint32_t> packed;
         std::vector<uint64_t> shared;
+        std::vector<std::array<unsigned char,4>> dataRuns;
         if(!memory.read(tree+16,domain,32)||!array(tree+64,sections,4096)||!array(tree+80,primitives)||
            !array(tree+96,sharedIndices)||!array(tree+112,packed)||!array(tree+128,shared)) return shapeFailure("compressed arrays");
+        haveTags=contents&&array(tree+144,dataRuns);
         for(float v:domain) if(!std::isfinite(v)) return shapeFailure("compressed domain nonfinite");
         std::vector<Vec3> sharedPoints;
         for(uint64_t v:shared) {
@@ -64,9 +114,9 @@ struct LiveWalls {
             sharedPoints.push_back({p[0],p[1],p[2]});
         }
         for(const auto& section:sections) {
-            float codec[6]; uint32_t first=0,sharedDesc=0,primitiveDesc=0;
+            float codec[6]; uint32_t first=0,sharedDesc=0,primitiveDesc=0,runDesc=0;
             memcpy(codec,section.data()+48,24); memcpy(&first,section.data()+72,4);
-            memcpy(&sharedDesc,section.data()+76,4); memcpy(&primitiveDesc,section.data()+80,4);
+            memcpy(&sharedDesc,section.data()+76,4); memcpy(&primitiveDesc,section.data()+80,4); memcpy(&runDesc,section.data()+84,4);
             unsigned packedCount=section[88],sharedCount=section[89];
             if(size_t(first)+packedCount>packed.size()||size_t(sharedDesc>>8)+sharedCount>sharedIndices.size()||
                size_t(primitiveDesc>>8)+(primitiveDesc&255)>primitives.size()) return shapeFailure("compressed section range");
@@ -83,6 +133,15 @@ struct LiveWalls {
             }
             struct Edge { unsigned a,b,count=0; Vec3 normal{}; bool crease=false; };
             std::unordered_map<uint32_t,Edge> edges;
+            std::array<uint16_t,256> tags; tags.fill(0xffff);
+            if(haveTags&&size_t(runDesc>>8)+(runDesc&255)<=dataRuns.size()) {
+                for(unsigned i=0;i<(runDesc&255);++i) {
+                    const auto& run=dataRuns[(runDesc>>8)+i];
+                    if(unsigned(run[2])+run[3]>(primitiveDesc&255)) continue;
+                    uint16_t tag=uint16_t(run[0])|(uint16_t(run[1])<<8);
+                    for(unsigned j=run[2];j<unsigned(run[2])+run[3];++j) tags[j]=tag;
+                }
+            }
             auto triangle=[&](unsigned a,unsigned b,unsigned c) {
                 if(a==b||b==c||a==c) return;
                 for(unsigned i:{a,b,c}) geometry.triangles.push_back(transform.apply(points[i]));
@@ -105,6 +164,7 @@ struct LiveWalls {
             for(unsigned i=0;i<(primitiveDesc&255);++i) {
                 const auto& p=primitives[(primitiveDesc>>8)+i];
                 if(p==std::array<unsigned char,4>{0xde,0xad,0xde,0xad}) continue;
+                if(haveTags&&!contents->allowsTag(address,tags[i])) continue;
                 for(unsigned v:p) if(v>=points.size()) return shapeFailure("compressed primitive vertex index");
                 triangle(p[0],p[1],p[2]); triangle(p[0],p[2],p[3]);
             }
@@ -115,7 +175,7 @@ struct LiveWalls {
         }
         return true;
     }
-    bool shape(uintptr_t address,const WallTransform& transform,Geometry& geometry,unsigned depth=0) {
+    bool shape(uintptr_t address,const WallTransform& transform,Geometry& geometry,unsigned depth=0,ShapeContentsFilter* contents=nullptr) {
         if(depth>12||geometry.triangles.size()>60000) return false;
         unsigned char data[112]{};
         if(!memory.read(address,data,sizeof(data))) return false;
@@ -137,11 +197,12 @@ struct LiveWalls {
                     if(!std::isfinite(v)||fabsf(v)>1000000) return false;
                     local.m[r*4+c]=v;
                 }
-                if(!shape(child,transform.compose(local),geometry,depth+1)) return false;
+                if(!shape(child,transform.compose(local),geometry,depth+1,contents)) return false;
             }
             return true;
         }
-        if(data[0x22]==9) return compressed(address,transform,geometry);
+        if(contents&&!contents->allowsShape(address)) return true;
+        if(data[0x22]==9) return compressed(address,transform,geometry,contents);
         // Box shapes (type 6) are also convex polytopes, with the same reflected arrays.
         if(!(u16(0x20)&2)) { shapeError="shape type "+std::to_string(data[0x22]); return false; }
         uint16_t vertices=u16(0x42),faces=u16(0x54),indices=u16(0x58);

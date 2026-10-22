@@ -159,6 +159,25 @@ int main() {
     LevelIdentity levelA=readLevelIdentity(memory,b); expect(levelA.name==mapA&&levelA.world==root,"current map identity");
     RuntimeSceneBuilder builder; auto worldA=builder.build(levelA);
     expect(worldA&&worldA->meshes.size()==1&&worldA->triangles==12&&worldA->unsupported==0,"runtime world decoding and BVH");
+    // Static Havok leaves carry gameplay contents in a validated idHavokShape table.
+    // Projectile/query-only leaves are skipped; solid and playerclip leaves remain.
+    std::vector<unsigned char> contentsWrapper(0x58),contentsRows(0x58);
+    uintptr_t wrapperAddress=reinterpret_cast<uintptr_t>(contentsWrapper.data());
+    uintptr_t rowsAddress=reinterpret_cast<uintptr_t>(contentsRows.data());
+    put(contentsWrapper.data(),0x08,rowsAddress); put(contentsWrapper.data(),0x10,uint32_t(1));
+    put(contentsRows.data(),0x00,wrapperAddress); put(poly.data(),0x30,rowsAddress);
+    put(contentsRows.data(),0x08,uint32_t(0x2));
+    auto queryOnly=builder.build(levelA);
+    expect(queryOnly&&queryOnly->meshes.empty()&&queryOnly->nonBlocking==1,"query-only world shape filtered");
+    put(contentsRows.data(),0x08,uint32_t(0x40000001));
+    queryOnly=builder.build(levelA);
+    expect(queryOnly&&queryOnly->meshes.empty(),"disabled world collision filtered");
+    put(contentsRows.data(),0x08,uint32_t(0x1));
+    worldA=builder.build(levelA);
+    expect(worldA&&worldA->meshes.size()==1&&worldA->nonBlocking==0,"player-solid world shape retained");
+    put(contentsRows.data(),0x08,uint32_t(0x8));
+    worldA=builder.build(levelA);
+    expect(worldA&&worldA->meshes.size()==1,"playerclip world shape retained");
     builder.cancelled=[] { return true; }; expect(!builder.build(levelA),"obsolete build cancellation");
     RuntimeSceneManager manager; manager.request(levelA,b);
     std::shared_ptr<const RuntimeScene> ready; std::shared_ptr<const RuntimeEntities> live;
