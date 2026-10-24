@@ -28,4 +28,8 @@ cl /nologo /std:c++17 /W4 /O2 /EHsc /MD /I"%VULKAN_HEADERS%" tests\depth_tracker
 if errorlevel 1 exit /b %errorlevel%
 cl /nologo /std:c++17 /W4 /O2 /EHsc /MD /I"%VULKAN_HEADERS%" tests\layer_loader_probe.cpp /Fo:build\layer_loader_probe.obj /Fe:bin\LayerLoaderProbe.exe /link /INCREMENTAL:NO
 if errorlevel 1 exit /b %errorlevel%
+cl /nologo /std:c++17 /W4 /O2 /EHsc /MD /I"%VULKAN_HEADERS%" tests\retail_profile_probe.cpp /Fo:build\retail_profile_probe.obj /Fe:bin\RetailProfileProbe.exe user32.lib /link /INCREMENTAL:NO
+if errorlevel 1 exit /b %errorlevel%
+cl /nologo /std:c++17 /W4 /O2 /EHsc /MD /I"%VULKAN_HEADERS%" tests\vulkan_smoke.cpp /Fo:build\vulkan_smoke.obj /Fe:bin\VulkanSmoke.exe user32.lib /link /INCREMENTAL:NO
+if errorlevel 1 exit /b %errorlevel%
 exit /b %errorlevel%

@@ -5,6 +5,13 @@ static void finishDepthProbe(Swapchain& swap,Frame& frame) {
     if(!frame.probePending) return;
     std::ofstream pixels(folder/L"visibility-depth.bin",std::ios::binary);
     VkDeviceSize offset=probeReadbackOffset(frame)+(smokeTest()?VkDeviceSize(swap.extent.width)*swap.extent.height*4:0);
+    float minimum=FLT_MAX,maximum=-FLT_MAX; size_t finite=0;
+    for(size_t i=0;i<size_t(swap.probeExtent.width)*swap.probeExtent.height;++i) {
+        float sample=0; memcpy(&sample,static_cast<const char*>(frame.mapped)+offset+i*4,4);
+        if(std::isfinite(sample)) { minimum=std::min(minimum,sample); maximum=std::max(maximum,sample); ++finite; }
+    }
+    char summary[320]; sprintf_s(summary,"Visibility probe: image=%llx finite=%zu depth=[%.9g,%.9g] mode=%u%s",frame.probeSource,finite,minimum,maximum,visibilitySettings.mode,
+        finite&&minimum==maximum?"; uniform depth: verify the selected image and projection mode before interpreting occlusion":""); note(summary);
     pixels.write(static_cast<const char*>(frame.mapped)+offset,size_t(swap.probeExtent.width)*swap.probeExtent.height*4); pixels.close();
     std::ofstream info(folder/L"visibility-depth.json");
     info<<"{\"request\":"<<frame.probeRequest<<",\"image\":\""<<std::hex<<frame.probeSource<<std::dec<<"\",\"format\":"<<frame.probeFormat<<",\"width\":"<<swap.probeExtent.width<<",\"height\":"<<swap.probeExtent.height<<",\"sourceWidth\":"<<frame.probeSourceExtent.width<<",\"sourceHeight\":"<<frame.probeSourceExtent.height<<",\"depthRange\":["<<frame.probeViewport.minDepth<<","<<frame.probeViewport.maxDepth<<"],\"matrix\":[";

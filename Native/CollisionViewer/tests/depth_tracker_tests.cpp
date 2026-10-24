@@ -5,8 +5,32 @@ int main() {
     try {
         check(visibilitySettings.bias==.05f,"Default depth tolerance did not include stability margin");
         check(fillDepthBias(visibilitySettings.bias)==.10f&&fillDepthBias(.2f)==.2f,"Filled surfaces did not receive independent depth tolerance");
-        folder=std::filesystem::current_path();
+        wchar_t temporary[MAX_PATH]{}; check(GetTempPathW(MAX_PATH,temporary)>0,"Temporary directory unavailable");
+        folder=std::filesystem::path(temporary)/(L"DEViLDepthTest_"+std::to_wstring(GetCurrentProcessId()));
+        std::filesystem::create_directories(folder);
+        const auto requestPath=folder/L"Visibility.request";
         Device device{};
+        // A valid but stale mode=0 request caused all gameplay fragments to
+        // disappear. Exercise the real file loader, including live recovery.
+        { std::ofstream request(requestPath); request<<"0 0 0 0.05\n"; }
+        HANDLE requestFile=CreateFileW(requestPath.c_str(),FILE_WRITE_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,0,nullptr);
+        check(requestFile!=INVALID_HANDLE_VALUE,"Cannot age diagnostic fixture");
+        FILETIME old{1,0}; check(SetFileTime(requestFile,nullptr,nullptr,&old)!=0,"Cannot set stale request time"); CloseHandle(requestFile);
+        check(!currentVisibilityRequest(requestPath),"Old diagnostic request accepted");
+        updateVisibilitySettings(device);
+        check(visibilitySettings.mode==2&&visibilitySettings.image==0,"Stale mode=0 must not override gameplay defaults");
+        { std::ofstream request(requestPath); request<<"1234 0 0 0.1\n"; }
+        Sleep(510); updateVisibilitySettings(device);
+        check(visibilitySettings.mode==0&&visibilitySettings.image==0x1234&&visibilitySettings.bias==.1f,"Current-session diagnostics must still work");
+        { std::ofstream request(requestPath); request<<"broken\n"; }
+        Sleep(510); updateVisibilitySettings(device);
+        check(visibilitySettings.mode==2&&visibilitySettings.image==0,"Invalid request must restore defaults, not retain override");
+        { std::ofstream request(requestPath); request<<"1234 1 0 0.1\n"; }
+        Sleep(510); updateVisibilitySettings(device);
+        check(visibilitySettings.mode==1,"Current-session projection experiment rejected");
+        std::filesystem::remove(requestPath);
+        Sleep(510); updateVisibilitySettings(device);
+        check(visibilitySettings.mode==2&&visibilitySettings.image==0,"Removing request must restore defaults");
         VkImage image=reinterpret_cast<VkImage>(uintptr_t(1));
         VkCommandBuffer primary=reinterpret_cast<VkCommandBuffer>(uintptr_t(2)),secondary=reinterpret_cast<VkCommandBuffer>(uintptr_t(3));
         DepthImage value{}; value.handle=image; value.format=VK_FORMAT_D32_SFLOAT; value.extent={128,128,1}; value.usage=VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT; value.samples=VK_SAMPLE_COUNT_1_BIT; value.layers=value.mips=1;
@@ -31,6 +55,8 @@ int main() {
         device.depth.images[image].stored=true; device.depth.images[image].samples=VK_SAMPLE_COUNT_4_BIT; check(chooseDepth(swap)==nullptr,"Multisampled depth selected as sampler2D");
         device.depth.images.erase(image); applyDepthCommands(device,primary,7); check(device.depth.images.empty(),"Destroyed image resurrected by command history");
         puts("PASS: submitted layouts, secondary viewports, reversed depth, freshness, queue ownership, discarded and multisampled buffers.");
+        if(logfile) { fclose(logfile); logfile=nullptr; }
+        std::filesystem::remove_all(folder);
         return 0;
     } catch(const std::exception& error) { fprintf(stderr,"FAIL: %s\n",error.what()); return 1; }
 }

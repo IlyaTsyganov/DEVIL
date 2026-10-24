@@ -1,19 +1,7 @@
 #pragma once
 // Read-only 1.1 layouts: idEntity, idPhysicsProperties, idHavokPhysics_Base;
 // Havok member offsets also match the map's embedded TAG0 type descriptions.
-static bool guardedCopy(uintptr_t address,void* output,size_t bytes) {
-    if(address<0x10000||address>0x7fffffffffffULL||bytes>0x1000000) return false;
-    __try { memcpy(output,reinterpret_cast<const void*>(address),bytes); return true; }
-    __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
-}
-struct WallMemory {
-    HANDLE remote{};
-    bool read(uintptr_t address,void* output,size_t size) const {
-        if(!remote) return guardedCopy(address,output,size);
-        SIZE_T got=0; return ReadProcessMemory(remote,reinterpret_cast<void*>(address),output,size,&got)&&got==size;
-    }
-    template<class T> bool get(uintptr_t address,T& value) const { return read(address,&value,sizeof(value)); }
-};
+#include "native_profile.h"
 // DOOM stores gameplay contents beside each Havok shape in an engine-owned
 // idHavokShape table. Validate the owner chain before using those flags.
 struct ShapeContentsFilter {
@@ -246,11 +234,11 @@ struct LiveWalls {
         }
         triggerTypes.emplace(vtable,result); return result;
     }
-    void refresh(uintptr_t base,bool includeTriggers=false) {
+    void refresh(uintptr_t base,const GameProfile& profile,bool includeTriggers=false) {
         auto start=std::chrono::steady_clock::now();
         meshes.clear(); entitiesExamined=active=unsupported=triggers=0;
         uintptr_t service=0,map=0,list=0; uint32_t count=0;
-        if(!memory.get(base+0x33fc468,service)||!memory.get(service+0x50,map)||
+        if(!memory.get(base+profile.gameSystemRva,service)||!memory.get(service+0x50,map)||
            !memory.get(map+0x61cb0,list)||!memory.get(map+0x61cb8,count)||count>32768) return;
         struct Entry { uint32_t id,generation; uintptr_t entity,previous,next; };
         std::vector<Entry> entries(count);
@@ -260,7 +248,7 @@ struct LiveWalls {
             uintptr_t vtable=0;
             if(!memory.get(entry.entity,vtable)) continue;
             bool trigger=includeTriggers&&triggerType(vtable,base);
-            if(!trigger&&vtable!=base+0x27f2b58) continue;
+            if(!trigger&&vtable!=base+profile.wallVtableRva) continue;
             unsigned char entity[0x240]{},physics[0x208]{}; uintptr_t physicsAddress=0;
             if(!memory.read(entry.entity,entity,sizeof(entity))||entity[0xa4]) continue;
             memcpy(&physicsAddress,entity+0x1d0,8);

@@ -6,10 +6,10 @@ struct LevelIdentity {
     bool operator!=(const LevelIdentity& other) const { return !(*this==other); }
     explicit operator bool() const { return map&&world&&!name.empty(); }
 };
-static LevelIdentity readLevelIdentity(const WallMemory& memory,uintptr_t base) {
+static LevelIdentity readLevelIdentity(const WallMemory& memory,uintptr_t base,const GameProfile& profile) {
     LevelIdentity result;
     uintptr_t system=0,player=0,physics=0,havok=0,wrapper=0,text=0; uint32_t length=0,state=0;
-    if(!memory.get(base+0x33fc468,system)||!memory.get(system+0x44,state)||state!=2||
+    if(!memory.get(base+profile.gameSystemRva,system)||!memory.get(system+0x44,state)||state!=2||
        !memory.get(system+0x50,result.map)||!memory.get(result.map+0x20,text)||!memory.get(result.map+0x28,length)||!length||length>511) return {};
     char name[512]{};
     if(!memory.read(text,name,length)) return {};
@@ -126,13 +126,14 @@ class RuntimeSceneManager {
     std::atomic<uint64_t> generation{0};
     std::atomic<bool> stopping{false};
     LevelIdentity requested;
+    const GameProfile* requestedProfile=nullptr;
     uintptr_t base=0;
     WallMemory memory;
     std::shared_ptr<const RuntimeScene> world;
     std::shared_ptr<const RuntimeEntities> entities;
     std::vector<std::shared_ptr<const RuntimeScene>> retired;
     void run() {
-        uint64_t version=0; LevelIdentity level; uintptr_t image=0; bool built=false;
+        uint64_t version=0; LevelIdentity level; uintptr_t image=0; bool built=false; const GameProfile* profile=nullptr;
         ULONGLONG retryAt=0;
         LiveWalls scanner; scanner.memory=memory;
         while(!stopping.load()) {
@@ -142,17 +143,17 @@ class RuntimeSceneManager {
                 wake.wait_for(lock,std::chrono::milliseconds(100),[&] { return stopping.load()||generation.load()!=version||!retired.empty(); });
                 if(stopping.load()) break;
                 garbage.swap(retired);
-                if(generation.load()!=version) { version=generation.load(); level=requested; image=base; built=false; retryAt=0; }
+                if(generation.load()!=version) { version=generation.load(); level=requested; image=base; profile=requestedProfile; built=false; retryAt=0; }
             }
             garbage.clear();
-            if(!level) continue;
+            if(!level||!profile) continue;
             try {
-                if(readLevelIdentity(memory,image)!=level) continue;
-                scanner.refresh(image,true);
+                if(readLevelIdentity(memory,image,*profile)!=level) continue;
+                scanner.refresh(image,*profile,true);
                 auto next=std::make_shared<RuntimeEntities>(); next->level=level;
                 next->meshes.swap(scanner.meshes); next->triggers=scanner.triggers; next->walls=scanner.active;
                 next->unsupported=scanner.unsupported; next->milliseconds=scanner.milliseconds;
-                if(readLevelIdentity(memory,image)!=level) continue;
+                if(readLevelIdentity(memory,image,*profile)!=level) continue;
                 {
                     std::lock_guard<std::mutex> lock(mutex);
                     if(generation.load()!=version) continue;
@@ -162,7 +163,7 @@ class RuntimeSceneManager {
                     RuntimeSceneBuilder builder; builder.memory=memory;
                     builder.cancelled=[&] { return stopping.load()||generation.load()!=version; };
                     auto nextWorld=builder.build(level);
-                    if(nextWorld&&readLevelIdentity(memory,image)==level) {
+                    if(nextWorld&&readLevelIdentity(memory,image,*profile)==level) {
                         std::lock_guard<std::mutex> lock(mutex);
                         if(generation.load()==version) { world=std::move(nextWorld); built=true; }
                     }
@@ -175,10 +176,10 @@ public:
     RuntimeSceneManager()=default;
     ~RuntimeSceneManager() { stop(); }
     void configure(WallMemory reader) { memory=reader; } // Before the first request; used by read-only probes/tests.
-    void request(const LevelIdentity& level,uintptr_t image) {
+    void request(const LevelIdentity& level,uintptr_t image,const GameProfile& profile) {
         std::lock_guard<std::mutex> lock(mutex);
-        if(requested==level&&worker.joinable()) return;
-        requested=level; base=image; world.reset(); entities.reset(); ++generation;
+        if(requested==level&&requestedProfile==&profile&&worker.joinable()) return;
+        requested=level; base=image; requestedProfile=&profile; world.reset(); entities.reset(); ++generation;
         if(!worker.joinable()) { stopping=false; worker=std::thread([this] { run(); }); }
         wake.notify_one();
     }
@@ -204,14 +205,16 @@ static std::shared_ptr<const RuntimeEntities> runtimeEntities;
 static bool runtimeRendering=false;
 static bool updateRuntimeScene() {
     uintptr_t base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
-    LevelIdentity level=readLevelIdentity(WallMemory{},base);
+    const GameProfile* profile=currentGameProfile();
+    if(!profile) return false;
+    LevelIdentity level=readLevelIdentity(WallMemory{},base,*profile);
     runtimeRendering=true;
     if(level!=runtimeLevel) {
         runtimeManager.retire(std::move(runtimeWorld)); runtimeEntities.reset(); runtimeLevel=level;
-        runtimeManager.request(level,base); liveWalls.meshes.clear();
+        runtimeManager.request(level,base,*profile); liveWalls.meshes.clear();
         char message[640]; sprintf_s(message,"Level changed: %s; old geometry removed, preparing current physics scene.",level?level.name.c_str():"loading/unavailable"); note(message);
     }
-    else if(level&&!runtimeWorld) runtimeManager.request(level,base);
+    else if(level&&!runtimeWorld) runtimeManager.request(level,base,*profile);
     bool hadWorld=bool(runtimeWorld);
     runtimeManager.snapshot(level,runtimeWorld,runtimeEntities);
     if(!hadWorld&&runtimeWorld) {

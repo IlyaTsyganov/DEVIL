@@ -182,6 +182,8 @@ struct Frame {
     VkImage probeImage{}; VkDeviceMemory probeMemory{}; VkImageView probeView{}; VkFramebuffer probeFramebuffer{};
     bool probePending=false; uint32_t probeRequest=0; uint64_t probeSource=0; GameCamera probeCamera{};
     VkViewport probeViewport{}; VkFormat probeFormat{}; VkExtent3D probeSourceExtent{};
+    VkCommandPool handoffPool{}; VkCommandBuffer releaseToGraphics{},acquireForPresent{};
+    VkSemaphore graphicsReady{},presentReady{}; uint32_t handoffFamily=~0u;
 };
 static bool overlayDepthTestEnabled(VkPrimitiveTopology topology) { return topology==VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; }
 static bool overlayDepthWriteEnabled(VkPrimitiveTopology topology) { return topology==VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; }
@@ -192,6 +194,8 @@ struct Swapchain {
     std::vector<Frame> frames; bool ready=false; uint32_t family=~0u; uint64_t rendered=0;
     VkDescriptorSetLayout depthLayout{}; VkDescriptorPool depthPool{}; VkSampler depthSampler{};
     VkRenderPass probePass{}; VkPipeline probePipeline{}; VkExtent2D probeExtent{}; uint32_t lastProbe=0;
+    VkSharingMode sharing=VK_SHARING_MODE_EXCLUSIVE; std::vector<uint32_t> sharingFamilies;
+    VkResult submitFailure=VK_SUCCESS;
 };
 static bool smokeTest();
 static bool sceneTest() { static const bool value=GetEnvironmentVariableW(L"DCV_SCENE_TEST",nullptr,0)>0; return value; }
@@ -209,6 +213,9 @@ static void cleanup(Swapchain& swap) {
         if(frame.allocation) d.FreeMemory(d.handle,frame.allocation,nullptr);
         if(frame.fence) d.DestroyFence(d.handle,frame.fence,nullptr);
         if(frame.complete) d.DestroySemaphore(d.handle,frame.complete,nullptr);
+        if(frame.graphicsReady) d.DestroySemaphore(d.handle,frame.graphicsReady,nullptr);
+        if(frame.presentReady) d.DestroySemaphore(d.handle,frame.presentReady,nullptr);
+        if(frame.handoffPool) d.DestroyCommandPool(d.handle,frame.handoffPool,nullptr);
         if(frame.framebuffer) d.DestroyFramebuffer(d.handle,frame.framebuffer,nullptr);
         if(frame.viewerDepthView) d.DestroyImageView(d.handle,frame.viewerDepthView,nullptr);
         if(frame.viewerDepth) d.DestroyImage(d.handle,frame.viewerDepth,nullptr);
@@ -579,10 +586,14 @@ static uint32_t collectVertices(const GameCamera& camera,std::vector<Vertex>& ou
 
 #include "depth_sampling.h"
 #include "depth_probe.h"
+#include "presentation_bridge.h"
 
-static bool draw(Swapchain& swap,VkQueue queue,uint32_t imageIndex,const VkPresentInfoKHR& present) {
+static bool draw(Swapchain& swap,VkQueue queue,uint32_t imageIndex,const VkPresentInfoKHR& present,VkQueue presentQueue,uint32_t presentFamily) {
     Device& d=*swap.device;
+    swap.submitFailure=VK_SUCCESS;
     if(imageIndex>=swap.frames.size()) return false;
+    const GameProfile* profile=currentGameProfile();
+    uintptr_t gameBase=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     GameCamera camera{};
     if(occlusionCase()) { camera.matrix[0]=camera.matrix[5]=camera.matrix[10]=camera.matrix[14]=1; camera.matrix[11]=-.05f; }
     else if(sceneTest()) {
@@ -590,13 +601,15 @@ static bool draw(Swapchain& swap,VkQueue queue,uint32_t imageIndex,const VkPrese
         if(!input.read(reinterpret_cast<char*>(&camera),sizeof(camera))) throw std::runtime_error("Missing test camera");
     }
     else if(smokeTest()) { camera.matrix[0]=camera.matrix[5]=camera.matrix[10]=camera.matrix[15]=1; }
-    else if(!readGameCamera(camera)) {
+    else if(!profile||!readGameCamera(WallMemory{},gameBase,*profile,camera)) {
         static ULONGLONG last=0;
-        if(GetTickCount64()-last>5000) { note("Waiting for a valid DOOM Eternal 1.1 level camera."); last=GetTickCount64(); }
+        if(GetTickCount64()-last>5000) { note(profile?"Waiting for a valid supported level camera.":"No supported DOOM Eternal 1.0/1.1 executable profile detected; overlay withheld."); last=GetTickCount64(); }
         return false;
     }
     if(!smokeTest()&&!sceneTest()&&!occlusionCase()) {
-        bool playing=gameplayVisible(WallMemory{},reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)));
+        static bool reported=false;
+        if(!reported) { char message[180]; sprintf_s(message,"Executable profile selected: %s; shared physical collision, visibility, menu and console filters enabled.",profile->name); note(message); reported=true; }
+        bool playing=gameplayVisible(WallMemory{},gameBase,*profile);
         static int previous=-1;
         if(previous!=int(playing)) { note(playing?"Gameplay resumed: overlay visible.":"Menu/pause/loading: overlay hidden."); previous=int(playing); }
         if(!playing) return false;
@@ -604,7 +617,7 @@ static bool draw(Swapchain& swap,VkQueue queue,uint32_t imageIndex,const VkPrese
     DepthImage* screenDepth=chooseDepth(swap);
     if(!screenDepth) return false;
     if(!smokeTest()&&!sceneTest()&&!occlusionCase()&&!updateRuntimeScene()) return false;
-    float consoleFraction=smokeTest()?0.0f:readConsoleFraction(WallMemory{},reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)));
+    float consoleFraction=smokeTest()||sceneTest()||occlusionCase()?0.0f:readConsoleFraction(WallMemory{},gameBase,*profile);
     if(smokeTest()) { wchar_t value[32]{}; if(GetEnvironmentVariableW(L"DCV_TEST_CONSOLE_FRACTION",value,32)) consoleFraction=static_cast<float>(_wtof(value)); }
     uint32_t consoleTop=consoleClipTop(consoleFraction,swap.extent.height);
     if(consoleTop==swap.extent.height&&!smokeTest()) return false;
@@ -613,6 +626,8 @@ static bool draw(Swapchain& swap,VkQueue queue,uint32_t imageIndex,const VkPrese
     if(vertices.empty()) return false;
     Frame& frame=swap.frames[imageIndex];
     if(d.WaitForFences(d.handle,1,&frame.fence,VK_TRUE,1000000000ull)!=VK_SUCCESS) { note("Overlay frame fence timeout; frame skipped."); return false; }
+    const bool ownershipHandoff=presentFamily!=swap.family&&swap.sharing==VK_SHARING_MODE_EXCLUSIVE;
+    if(ownershipHandoff) preparePresentHandoff(swap,frame,presentFamily);
     finishDepthProbe(swap,frame);
     ensureVertexCapacity(swap,frame,vertices.size());
     memcpy(frame.mapped,vertices.data(),vertices.size()*sizeof(Vertex));
@@ -624,6 +639,7 @@ static bool draw(Swapchain& swap,VkQueue queue,uint32_t imageIndex,const VkPrese
     require(d.ResetCommandBuffer(frame.commands,0),"ResetCommandBuffer failed");
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO}; begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     require(d.BeginCommandBuffer(frame.commands,&begin),"BeginCommandBuffer failed");
+    if(ownershipHandoff) swapOwnershipBarrier(d,frame.commands,frame.image,presentFamily,swap.family,true,true);
     depthSamplingBarrier(d,frame.commands,*screenDepth,false);
     struct PushConstants { float matrix[16]; float options[4]; float depth[4]; float uv[4]; float debug[4]; } push{};
     memcpy(push.matrix,camera.matrix,64); push.options[0]=1.0e30f; // shader far plane; radius filters whole mesh bounds on CPU
@@ -668,13 +684,28 @@ static bool draw(Swapchain& swap,VkQueue queue,uint32_t imageIndex,const VkPrese
         VkMemoryBarrier host{VK_STRUCTURE_TYPE_MEMORY_BARRIER}; host.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT; host.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
         d.CmdPipelineBarrier(frame.commands,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT|VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,0,1,&host,0,nullptr,1,&barrier);
     }
+    if(ownershipHandoff) swapOwnershipBarrier(d,frame.commands,frame.image,swap.family,presentFamily,false,true);
     require(d.EndCommandBuffer(frame.commands),"EndCommandBuffer failed");
+    require(d.ResetFences(d.handle,1,&frame.fence),"ResetFences failed");
     std::vector<VkPipelineStageFlags> stages(present.waitSemaphoreCount,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+    if(ownershipHandoff) {
+        VkSubmitInfo handoff{VK_STRUCTURE_TYPE_SUBMIT_INFO}; handoff.waitSemaphoreCount=present.waitSemaphoreCount; handoff.pWaitSemaphores=present.pWaitSemaphores; handoff.pWaitDstStageMask=stages.data();
+        handoff.commandBufferCount=1; handoff.pCommandBuffers=&frame.releaseToGraphics; handoff.signalSemaphoreCount=1; handoff.pSignalSemaphores=&frame.graphicsReady;
+        swap.submitFailure=d.QueueSubmit(presentQueue,1,&handoff,VK_NULL_HANDLE);
+        if(swap.submitFailure!=VK_SUCCESS) { note("Presentation release submission failed."); return false; }
+    }
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO}; submit.waitSemaphoreCount=present.waitSemaphoreCount; submit.pWaitSemaphores=present.pWaitSemaphores;
     submit.pWaitDstStageMask=stages.data(); submit.commandBufferCount=1; submit.pCommandBuffers=&frame.commands; submit.signalSemaphoreCount=1; submit.pSignalSemaphores=&frame.complete;
-    require(d.ResetFences(d.handle,1,&frame.fence),"ResetFences failed");
-    VkResult result=d.QueueSubmit(queue,1,&submit,frame.fence);
-    if(result!=VK_SUCCESS) { enabled=false; note("Overlay QueueSubmit failed; overlay disabled."); return false; }
+    VkPipelineStageFlags graphicsWait=VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    if(ownershipHandoff) { submit.waitSemaphoreCount=1; submit.pWaitSemaphores=&frame.graphicsReady; submit.pWaitDstStageMask=&graphicsWait; }
+    VkResult result=d.QueueSubmit(queue,1,&submit,ownershipHandoff?VK_NULL_HANDLE:frame.fence);
+    if(result!=VK_SUCCESS) { swap.submitFailure=result; enabled=false; note("Overlay QueueSubmit failed; overlay disabled."); return false; }
+    if(ownershipHandoff) {
+        VkSubmitInfo handoff{VK_STRUCTURE_TYPE_SUBMIT_INFO}; handoff.waitSemaphoreCount=1; handoff.pWaitSemaphores=&frame.complete; handoff.pWaitDstStageMask=&graphicsWait;
+        handoff.commandBufferCount=1; handoff.pCommandBuffers=&frame.acquireForPresent; handoff.signalSemaphoreCount=1; handoff.pSignalSemaphores=&frame.presentReady;
+        swap.submitFailure=d.QueueSubmit(presentQueue,1,&handoff,frame.fence);
+        if(swap.submitFailure!=VK_SUCCESS) { note("Presentation acquire submission failed."); return false; }
+    }
     if(smokeTest()&&d.WaitForFences(d.handle,1,&frame.fence,VK_TRUE,1000000000ull)==VK_SUCCESS) {
         const unsigned char* pixels=static_cast<const unsigned char*>(frame.mapped)+readbackOffset;
         const unsigned char* pixel=pixels+(size_t(swap.extent.height/2)*swap.extent.width+swap.extent.width/2)*4;
@@ -796,6 +827,8 @@ EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(VkDevice device,const
     VkResult result=data->CreateSwapchainKHR(device,&modified,allocator,swapchain);
     if(result==VK_SUCCESS) {
         auto swap=std::make_unique<Swapchain>(); swap->device=data; swap->handle=*swapchain; swap->extent=info->imageExtent; swap->format=info->imageFormat;
+        swap->sharing=info->imageSharingMode;
+        if(info->imageSharingMode==VK_SHARING_MODE_CONCURRENT&&info->pQueueFamilyIndices) swap->sharingFamilies.assign(info->pQueueFamilyIndices,info->pQueueFamilyIndices+info->queueFamilyIndexCount);
         uint32_t count=0; data->GetSwapchainImagesKHR(device,*swapchain,&count,nullptr); std::vector<VkImage> images(count); data->GetSwapchainImagesKHR(device,*swapchain,&count,images.data());
         swap->frames.resize(count); for(uint32_t i=0;i<count;++i) swap->frames[i].image=images[i]; swaps[*swapchain]=std::move(swap); note("Swapchain connected.");
     }
@@ -819,14 +852,19 @@ EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(VkQueue queue,const VkPr
     if(enabled&&foundQueue!=queues.end()&&present->swapchainCount==1) {
         auto found=swaps.find(present->pSwapchains[0]);
         uint32_t family=foundQueue->second.family;
-        if(found!=swaps.end()&&family<data.families.size()&&(data.families[family].queueFlags&VK_QUEUE_GRAPHICS_BIT)) {
+        if(found!=swaps.end()&&family<data.families.size()) {
             Swapchain& swap=*found->second;
+            uint32_t renderFamily=~0u; VkQueue renderQueue=overlayQueue(swap,queue,family,renderFamily);
+            if(!renderQueue) { static ULONGLONG last=0; if(GetTickCount64()-last>5000) { note("Overlay withheld: no registered graphics queue can access this swapchain."); last=GetTickCount64(); } return data.QueuePresentKHR(queue,present); }
             try {
-                if(!swap.ready) initialize(swap,family);
-                if(swap.family==family&&draw(swap,queue,present->pImageIndices[0],*present)) {
-                    VkPresentInfoKHR modified=*present; modified.waitSemaphoreCount=1; modified.pWaitSemaphores=&swap.frames[present->pImageIndices[0]].complete;
+                if(!swap.ready) { initialize(swap,renderFamily); char message[200]; sprintf_s(message,"Overlay queues: graphics=%u present=%u sharing=%s.",renderFamily,family,swap.sharing==VK_SHARING_MODE_EXCLUSIVE?"exclusive":"concurrent"); note(message); }
+                if(swap.family==renderFamily&&draw(swap,renderQueue,present->pImageIndices[0],*present,queue,family)) {
+                    Frame& frame=swap.frames[present->pImageIndices[0]];
+                    VkSemaphore* ready=family!=swap.family&&swap.sharing==VK_SHARING_MODE_EXCLUSIVE?&frame.presentReady:&frame.complete;
+                    VkPresentInfoKHR modified=*present; modified.waitSemaphoreCount=1; modified.pWaitSemaphores=ready;
                     return data.QueuePresentKHR(queue,&modified);
                 }
+                if(swap.submitFailure!=VK_SUCCESS) return swap.submitFailure;
             } catch(const std::exception& error) { note(error.what()); enabled=false; note("Overlay disabled after error; game presentation is forwarded."); }
         }
     }

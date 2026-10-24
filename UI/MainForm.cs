@@ -316,7 +316,12 @@ internal sealed class MainForm : Form
         var snapshot = _processMonitor.ReadSnapshot();
         SetStatus(_gameStatus, snapshot.GameRunning ? "Running" : "Not running", snapshot.GameRunning);
         SetStatus(_desruStatus, snapshot.DesruRunning ? "Running" : "Not running", snapshot.DesruRunning);
-        SetStatus(_viewerStatus, _settings.CollisionViewerEnabled ? "Restart game" : "Disabled", _settings.CollisionViewerEnabled, _settings.CollisionViewerEnabled);
+        bool viewerEnabled = _settings.CollisionViewerEnabled;
+        bool restartRequired = viewerEnabled && snapshot.GameRunning && snapshot.GameStartedBeforeViewer;
+        string viewerStatus = !viewerEnabled ? "Disabled"
+            : restartRequired ? "Restart game"
+            : snapshot.GameRunning ? "Running" : "Enabled";
+        SetStatus(_viewerStatus, viewerStatus, viewerEnabled, restartRequired);
         _launchButton.Enabled = !snapshot.GameRunning && !string.IsNullOrWhiteSpace(_settings.GameExecutablePath);
     }
 

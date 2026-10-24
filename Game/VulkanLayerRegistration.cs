@@ -15,7 +15,6 @@ public sealed class VulkanLayerRegistration
     private const string OverrideName = "VK_LAYER_LUNARG_override";
     private const string ExplicitLayersKey = @"Software\Khronos\Vulkan\ExplicitLayers";
     private const string ImplicitLayersKey = @"Software\Khronos\Vulkan\ImplicitLayers";
-    private const string SupportedGameSha256 = "0fa3177e7f74a5fe7571e1f2954db649dc99a1c8c6f6050a2a39ef799d37ea7f";
 
     private readonly SettingsStore _settingsStore;
 
@@ -80,11 +79,6 @@ public sealed class VulkanLayerRegistration
         string fullPath = Path.GetFullPath(gamePath);
         if (!Path.GetFileName(fullPath).Equals("DOOMEternalx64vk.exe", StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Automatic layer loading supports DOOMEternalx64vk.exe.");
-
-        using FileStream executable = File.OpenRead(fullPath);
-        string actualHash = Convert.ToHexString(SHA256.HashData(executable)).ToLowerInvariant();
-        if (!actualHash.Equals(SupportedGameSha256, StringComparison.Ordinal))
-            throw new InvalidOperationException("Automatic layer loading supports only the verified DOOM Eternal 1.1 profile.");
 
         return fullPath;
     }

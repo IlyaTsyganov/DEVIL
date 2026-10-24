@@ -8,6 +8,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\devil.ico</ApplicationIcon>
     <AssemblyName>DEViL</AssemblyName>
+    <Version>0.3.0</Version>
     <RootNamespace>Devil</RootNamespace>
     <PlatformTarget>x64</PlatformTarget>
   </PropertyGroup>

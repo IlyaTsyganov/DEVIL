@@ -3,16 +3,36 @@
 struct VisibilitySettings { uint64_t image=0; uint32_t mode=0,probe=0; float bias=.05f; };
 static float fillDepthBias(float lineBias) { return std::max(lineBias,.10f); }
 static VisibilitySettings visibilitySettings;
+static VisibilitySettings defaultVisibilitySettings() {
+    VisibilitySettings value; value.mode=smokeTest()?0u:2u; return value;
+}
+// Vulkan image handles and projection experiments belong to one game run.
+// Never let an old diagnostic request silently override a later launch.
+static bool currentVisibilityRequest(const std::filesystem::path& path) {
+    WIN32_FILE_ATTRIBUTE_DATA data{}; FILETIME created{},exited{},kernel{},user{};
+    return GetFileAttributesExW(path.c_str(),GetFileExInfoStandard,&data)&&
+        GetProcessTimes(GetCurrentProcess(),&created,&exited,&kernel,&user)&&
+        CompareFileTime(&data.ftLastWriteTime,&created)>=0;
+}
 static void updateVisibilitySettings(Device& d) {
-    static const bool initialized=[] { visibilitySettings.mode=smokeTest()?0u:2u; return true; }();
-    (void)initialized;
     static ULONGLONG checked=0;
     if(GetTickCount64()-checked<500) return;
     checked=GetTickCount64();
-    std::ifstream input(folder/L"Visibility.request"); VisibilitySettings value{};
-    if(input>>std::hex>>value.image>>std::dec>>value.mode>>value.probe>>value.bias) {
-        if(value.mode<=2&&std::isfinite(value.bias)&&value.bias>=0&&value.bias<=.5f) visibilitySettings=value;
+    const auto path=folder/L"Visibility.request";
+    VisibilitySettings value=defaultVisibilitySettings();
+    const char* status="default (no current-session request)";
+    if(currentVisibilityRequest(path)) {
+        std::ifstream input(path); VisibilitySettings request{};
+        if((input>>std::hex>>request.image>>std::dec>>request.mode>>request.probe>>request.bias)&&
+           request.mode<=2&&std::isfinite(request.bias)&&request.bias>=0&&request.bias<=.5f) {
+            value=request; status="current-session diagnostic override";
+        } else status="default (invalid diagnostic request)";
+    } else if(std::filesystem::exists(path)) status="default (stale diagnostic request ignored)";
+    static std::string previous;
+    if(previous!=status||value.image!=visibilitySettings.image||value.mode!=visibilitySettings.mode||value.bias!=visibilitySettings.bias||value.probe!=visibilitySettings.probe) {
+        char message[320]; sprintf_s(message,"Visibility settings: %s; image=%llx mode=%u probe=%u bias=%.3f; pid=%lu",status,value.image,value.mode,value.probe,value.bias,GetCurrentProcessId()); note(message); previous=status;
     }
+    visibilitySettings=value;
     static uint32_t dumped=0;
     if(visibilitySettings.probe!=dumped) {
         std::ofstream report(folder/L"visibility-candidates.json"); report<<"["; bool first=true;
