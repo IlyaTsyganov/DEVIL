@@ -117,12 +117,12 @@ int main() {
     for(bool* toggle:{&showTriggers,&showCollision,&showWalls}) {
         *toggle=false; expect(collectVertices(camera,vertices)==6&&vertices.size()==10,"independent group toggle"); *toggle=true;
     }
-    // Exercise the same readers and filters with both audited retail layouts.
-    for(const GameProfile* selected:{&kProfile11,&kProfile10}) {
+    // Exercise the same readers and filters with all audited retail layouts.
+    for(const GameProfile* selected:{&kProfile11,&kProfile10,&kProfile31,&kProfile51}) {
     const GameProfile& profile=*selected;
-    auto* base=static_cast<unsigned char*>(VirtualAlloc(nullptr,0x6000000,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE));
+    auto* base=static_cast<unsigned char*>(VirtualAlloc(nullptr,0x7000000,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE));
     expect(base!=nullptr,"fixture allocation");
-    std::vector<unsigned char> system(0x60),map(0x61cc0),player(0x36800),menu(0xc8),entity(0x240),physics(0x220),poly(0x200);
+    std::vector<unsigned char> system(0x60),map(0x61d00),player(0x4c8a0),menu(0xc8),entity(0x240),physics(0x220),poly(0x200);
     uintptr_t b=reinterpret_cast<uintptr_t>(base),menuAddress=reinterpret_cast<uintptr_t>(menu.data());
     IMAGE_DOS_HEADER dos{}; dos.e_magic=IMAGE_DOS_SIGNATURE; dos.e_lfanew=0x80;
     IMAGE_NT_HEADERS64 nt{}; nt.Signature=IMAGE_NT_SIGNATURE; nt.FileHeader.Machine=IMAGE_FILE_MACHINE_AMD64;
@@ -133,20 +133,31 @@ int main() {
     base[profile.fingerprintRva]^=1; expect(!detectGameProfile(WallMemory{},b),"mismatched code rejected"); base[profile.fingerprintRva]^=1;
     ++nt.FileHeader.TimeDateStamp; memcpy(base+dos.e_lfanew,&nt,sizeof(nt));
     expect(!detectGameProfile(WallMemory{},b),"unknown executable rejected"); --nt.FileHeader.TimeDateStamp; memcpy(base+dos.e_lfanew,&nt,sizeof(nt));
-    std::vector<unsigned char> renderer(0x5a71a0),view(0x21910);
+    std::vector<unsigned char> renderer(0x5a71b0),view(0x21970);
     uintptr_t viewPointer=reinterpret_cast<uintptr_t>(view.data());
     put(base,profile.rendererRva,reinterpret_cast<uintptr_t>(renderer.data()));
-    put(renderer.data(),0x5a7190,int(1)); put(renderer.data(),0x5a7188,reinterpret_cast<uintptr_t>(&viewPointer));
+    put(renderer.data(),profile.viewsOffset+8,int(1)); put(renderer.data(),profile.viewsOffset,reinterpret_cast<uintptr_t>(&viewPointer));
     GameCamera expectedCamera{}; expectedCamera.matrix[0]=expectedCamera.matrix[5]=expectedCamera.matrix[10]=expectedCamera.matrix[14]=1;
-    expectedCamera.matrix[11]=-.05f; memcpy(view.data()+0x213f0,expectedCamera.matrix,64);
+    expectedCamera.matrix[11]=-.05f; memcpy(view.data()+profile.viewMatrixOffset,expectedCamera.matrix,64);
     GameCamera observedCamera{};
     expect(readGameCamera(WallMemory{},b,profile,observedCamera),"camera uses selected renderer global");
     expect(!memcmp(observedCamera.matrix,expectedCamera.matrix,64),"camera matrix copied without changing projection");
+    // The view position moved independently of the matrix between releases.
+    // Use a translated camera so reading an unrelated zero field cannot pass.
+    const float translatedPosition[]{10,20,30};
+    memcpy(view.data()+profile.viewPositionOffset,translatedPosition,sizeof(translatedPosition));
+    expectedCamera.matrix[15]=-30;
+    memcpy(view.data()+profile.viewMatrixOffset,expectedCamera.matrix,64);
+    expect(readGameCamera(WallMemory{},b,profile,observedCamera)&&!memcmp(observedCamera.position,translatedPosition,sizeof(translatedPosition)),"translated camera reads the selected position member");
+    memset(view.data()+profile.viewPositionOffset,0,sizeof(translatedPosition));
+    expectedCamera.matrix[15]=0;
+    memcpy(view.data()+profile.viewMatrixOffset,expectedCamera.matrix,64);
+    expect(readGameCamera(WallMemory{},b,profile,observedCamera),"origin camera restored");
     const float onScreen[]{-.1f,-.1f,1,.1f,.1f,2},offScreen[]{4,-.1f,1,5,.1f,2},behindCamera[]{-.1f,-.1f,-2,.1f,.1f,-1};
     expect(ViewFilter(observedCamera).inView(onScreen)&&!ViewFilter(observedCamera).inView(offScreen)&&!ViewFilter(observedCamera).inView(behindCamera),"off-screen and rear geometry rejected for both profiles");
     put(base,profile.gameSystemRva,reinterpret_cast<uintptr_t>(system.data())); put(system.data(),0x44,uint32_t(2));
-    put(system.data(),0x50,reinterpret_cast<uintptr_t>(map.data())); put(map.data(),0x1ad0,reinterpret_cast<uintptr_t>(player.data()));
-    put(player.data(),0,b+profile.playerVtableRva); put(player.data(),profile.playerHudOffset+0x358,reinterpret_cast<uintptr_t>(&menuAddress)); put(player.data(),profile.playerHudOffset+0x360,uint32_t(1));
+    put(system.data(),0x50,reinterpret_cast<uintptr_t>(map.data())); put(map.data(),profile.mapPlayerOffset,reinterpret_cast<uintptr_t>(player.data()));
+    put(player.data(),0,b+profile.playerVtableRva); put(player.data(),profile.playerHudOffset+profile.hudMenusOffset,reinterpret_cast<uintptr_t>(&menuAddress)); put(player.data(),profile.playerHudOffset+profile.hudMenusOffset+8,uint32_t(1));
     put(menu.data(),0x90,int(-1)); put(menu.data(),0x94,int(-1));
     WallMemory memory;
     put(base,profile.consoleRva,b+profile.consoleVtableRva); put(base,profile.consoleRva+0x6080fc,.5f);
@@ -155,12 +166,12 @@ int main() {
     expect(consoleClipTop(0,100)==0&&consoleClipTop(1,100)==100&&consoleClipTop(-1,100)==0&&consoleClipTop(.1f,100)==12,"console clipping bounds");
     expect(gameplayVisible(memory,b,profile),"gameplay visible");
     put(player.data(),0,b+0x123456); expect(!gameplayVisible(memory,b,profile),"incorrect player type hidden"); put(player.data(),0,b+profile.playerVtableRva);
-    player[profile.playerHudOffset+0x3ac]=1; expect(!gameplayVisible(memory,b,profile),"pause hidden"); player[profile.playerHudOffset+0x3ac]=0;
+    player[profile.playerHudOffset+profile.hudPausedOffset]=1; expect(!gameplayVisible(memory,b,profile),"pause hidden"); player[profile.playerHudOffset+profile.hudPausedOffset]=0;
     put(menu.data(),0x90,int(2)); expect(!gameplayVisible(memory,b,profile),"HUD menu hidden"); put(menu.data(),0x90,int(-1));
     put(menu.data(),0x94,int(2)); expect(!gameplayVisible(memory,b,profile),"menu transition hidden"); put(menu.data(),0x94,int(-1));
     put(menu.data(),0x80,int(1)); expect(!gameplayVisible(memory,b,profile),"popup hidden"); put(menu.data(),0x80,int(0));
     put(system.data(),0x44,uint32_t(0)); expect(!gameplayVisible(memory,b,profile),"main menu/loading hidden"); put(system.data(),0x44,uint32_t(2));
-    put(map.data(),0x1ad0,uintptr_t(0)); expect(!gameplayVisible(memory,b,profile),"no level player hidden");
+    put(map.data(),profile.mapPlayerOffset,uintptr_t(0)); expect(!gameplayVisible(memory,b,profile),"no level player hidden");
     // A live convex wall: activation, removal, respawn and movement use physics state.
     put(poly.data(),0x22,uint8_t(1));
     put(poly.data(),0x20,uint16_t(2));
@@ -177,14 +188,14 @@ int main() {
     put(physics.data(),0x1c0,reinterpret_cast<uintptr_t>(&root));
     float axis[9]{1,0,0,0,1,0,0,0,1},origin[3]{10,20,30}; memcpy(physics.data()+0x8c,axis,36); memcpy(physics.data()+0xb0,origin,12);
     uintptr_t row[4]{1,reinterpret_cast<uintptr_t>(entity.data()),0,0};
-    put(map.data(),0x61cb0,reinterpret_cast<uintptr_t>(row)); put(map.data(),0x61cb8,uint32_t(1));
+    put(map.data(),profile.mapEntitiesOffset,reinterpret_cast<uintptr_t>(row)); put(map.data(),profile.mapEntitiesOffset+8,uint32_t(1));
     LiveWalls walls; walls.refresh(b,profile);
     expect(walls.meshes.size()==1&&walls.meshes[0].geometry->triangles.size()==36&&walls.meshes[0].geometry->lines.size()==24,"exact live convex topology");
     expect(walls.meshes[0].bounds[0]==9&&walls.meshes[0].bounds[5]==33,"live world transform");
     put(physics.data(),0x44,uint32_t(0x40000000)); walls.refresh(b,profile); expect(walls.meshes.empty(),"disabled collision disappears");
     put(physics.data(),0x44,uint32_t(8)); entity[0xa4]=1; walls.refresh(b,profile); expect(walls.meshes.empty(),"deleted entity disappears"); entity[0xa4]=0;
-    put(map.data(),0x61cb8,uint32_t(0)); walls.refresh(b,profile); expect(walls.meshes.empty(),"despawned slot disappears");
-    put(map.data(),0x61cb8,uint32_t(1)); put(physics.data(),0xb0,12.f); walls.refresh(b,profile); expect(walls.meshes.size()==1&&walls.meshes[0].bounds[0]==11,"respawn/movement refreshed");
+    put(map.data(),profile.mapEntitiesOffset+8,uint32_t(0)); walls.refresh(b,profile); expect(walls.meshes.empty(),"despawned slot disappears");
+    put(map.data(),profile.mapEntitiesOffset+8,uint32_t(1)); put(physics.data(),0xb0,12.f); walls.refresh(b,profile); expect(walls.meshes.size()==1&&walls.meshes[0].bounds[0]==11,"respawn/movement refreshed");
     put(physics.data(),0x14,uint32_t(7)); walls.refresh(b,profile); expect(walls.meshes.empty(),"rigid wall outside world hidden");
     physics[0x210]=1; walls.refresh(b,profile); expect(walls.meshes.size()==1,"rigid wall added to world");
     const uintptr_t triggerVtable=b+0x200000,triggerGetter=b+0x210000,triggerInfo=b+0x220000;
@@ -201,9 +212,9 @@ int main() {
     put(entity.data(),0,b+profile.wallVtableRva); put(physics.data(),0x44,uint32_t(8));
     // Discover the map through the same live chain as production; no filename list.
     std::vector<unsigned char> havok(0x210c0);
-    const std::string mapA="game/sp/test_a/test_a",mapB="game/sp/test_b/test_b";
+    const std::string mapA="game/dlc2/e5m1_spear/e5m1_spear",mapB="game/dlc/e4m1_rig/e4m1_rig";
     put(map.data(),0x20,reinterpret_cast<uintptr_t>(mapA.c_str())); put(map.data(),0x28,uint32_t(mapA.size()));
-    put(map.data(),0x1ad0,reinterpret_cast<uintptr_t>(player.data())); put(player.data(),0x1d0,reinterpret_cast<uintptr_t>(physics.data()));
+    put(map.data(),profile.mapPlayerOffset,reinterpret_cast<uintptr_t>(player.data())); put(player.data(),0x1d0,reinterpret_cast<uintptr_t>(physics.data()));
     put(physics.data(),0x80,reinterpret_cast<uintptr_t>(havok.data())); put(havok.data(),0x210b0,reinterpret_cast<uintptr_t>(&root));
     LevelIdentity levelA=readLevelIdentity(memory,b,profile); expect(levelA.name==mapA&&levelA.world==root,"current map identity");
     RuntimeSceneBuilder builder; auto worldA=builder.build(levelA);
