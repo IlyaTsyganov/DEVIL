@@ -1,16 +1,16 @@
 #pragma once
-// Audited retail 1.0/1.1 idGameSystemLocal/idPlayer/idHUD/idMenu layouts.
+// Audited retail 1.0/1.1/3.1/5.1 idGameSystemLocal/idPlayer/idHUD/idMenu layouts.
 // Missing/unloading game state is deliberately treated as a menu/loading screen.
 static bool gameplayVisible(const WallMemory& memory,uintptr_t base,const GameProfile& profile) {
     uintptr_t system=0,map=0,player=0,vtable=0;
     uint32_t state=0;
     if(!memory.get(base+profile.gameSystemRva,system)||!memory.get(system+0x44,state)||state!=2||
-       !memory.get(system+0x50,map)||!memory.get(map+0x1ad0,player)||
+       !memory.get(system+0x50,map)||!memory.get(map+profile.mapPlayerOffset,player)||
        !memory.get(player,vtable)||vtable!=base+profile.playerVtableRva) return false;
     unsigned char paused=1,deleted=1;
-    if(!memory.get(player+0xa4,deleted)||deleted||!memory.get(player+profile.playerHudOffset+0x3ac,paused)||paused) return false;
+    if(!memory.get(player+0xa4,deleted)||deleted||!memory.get(player+profile.playerHudOffset+profile.hudPausedOffset,paused)||paused) return false;
     uintptr_t menus=0; uint32_t count=0;
-    if(!memory.get(player+profile.playerHudOffset+0x358,menus)||!memory.get(player+profile.playerHudOffset+0x360,count)||count>64) return false;
+    if(!memory.get(player+profile.playerHudOffset+profile.hudMenusOffset,menus)||!memory.get(player+profile.playerHudOffset+profile.hudMenusOffset+8,count)||count>64) return false;
     for(uint32_t i=0;i<count;++i) {
         uintptr_t menu=0; unsigned char data[0xc8]{};
         if(!memory.get(menus+size_t(i)*8,menu)||!memory.read(menu,data,sizeof(data))) return false;

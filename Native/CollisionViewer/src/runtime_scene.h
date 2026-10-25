@@ -15,7 +15,7 @@ static LevelIdentity readLevelIdentity(const WallMemory& memory,uintptr_t base,c
     if(!memory.read(text,name,length)) return {};
     for(uint32_t i=0;i<length;++i) if(name[i]<32||name[i]>=127) return {};
     result.name.assign(name,length);
-    if(!memory.get(result.map+0x1ad0,player)||!memory.get(player+0x1d0,physics)||!memory.get(physics+0x80,havok)||
+    if(!memory.get(result.map+profile.mapPlayerOffset,player)||!memory.get(player+0x1d0,physics)||!memory.get(physics+0x80,havok)||
        !memory.get(havok+0x210b0,wrapper)||!memory.get(wrapper,result.world)||!result.world) return {};
     return result;
 }

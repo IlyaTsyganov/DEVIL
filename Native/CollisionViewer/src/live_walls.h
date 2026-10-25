@@ -1,5 +1,5 @@
 #pragma once
-// Read-only 1.1 layouts: idEntity, idPhysicsProperties, idHavokPhysics_Base;
+// Shared read-only 1.0/1.1/3.1/5.1 layouts: idEntity, idPhysicsProperties, idHavokPhysics_Base;
 // Havok member offsets also match the map's embedded TAG0 type descriptions.
 #include "native_profile.h"
 // DOOM stores gameplay contents beside each Havok shape in an engine-owned
@@ -239,7 +239,7 @@ struct LiveWalls {
         meshes.clear(); entitiesExamined=active=unsupported=triggers=0;
         uintptr_t service=0,map=0,list=0; uint32_t count=0;
         if(!memory.get(base+profile.gameSystemRva,service)||!memory.get(service+0x50,map)||
-           !memory.get(map+0x61cb0,list)||!memory.get(map+0x61cb8,count)||count>32768) return;
+           !memory.get(map+profile.mapEntitiesOffset,list)||!memory.get(map+profile.mapEntitiesOffset+8,count)||count>32768) return;
         struct Entry { uint32_t id,generation; uintptr_t entity,previous,next; };
         std::vector<Entry> entries(count);
         if(count&&!memory.read(list,entries.data(),entries.size()*sizeof(Entry))) return;
