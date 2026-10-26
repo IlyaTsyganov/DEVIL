@@ -11,7 +11,15 @@ public sealed class GameLauncher(SettingsStore settingsStore)
 
     public Process Start(DevilSettings settings)
     {
-        string gamePath = settings.GameExecutablePath;
+        var startInfo = CreateStartInfo(settings.GameExecutablePath);
+        if (settings.CollisionViewerEnabled || startInfo.Environment[LightingFixPolicy.EnvironmentVariable] == "1")
+            _layerRegistration.EnableForGame(startInfo.FileName);
+
+        return Process.Start(startInfo) ?? throw new InvalidOperationException("Windows could not start DOOM Eternal.");
+    }
+
+    internal static ProcessStartInfo CreateStartInfo(string gamePath)
+    {
         if (string.IsNullOrWhiteSpace(gamePath) || !File.Exists(gamePath))
             throw new FileNotFoundException("Select an existing DOOM Eternal executable in the game path section.", gamePath);
 
@@ -26,11 +34,15 @@ public sealed class GameLauncher(SettingsStore settingsStore)
             UseShellExecute = false
         };
 
-        if (settings.CollisionViewerEnabled)
-        {
-            _layerRegistration.EnableForGame(gamePath);
-        }
-
-        return Process.Start(startInfo) ?? throw new InvalidOperationException("Windows could not start DOOM Eternal.");
+        // Child process only: manual/Steam launches keep their existing behavior.
+        // Explicitly clear an inherited opt-in for all other game versions.
+        bool lightingFix = LightingFixPolicy.NeedsFix(gamePath);
+        startInfo.Environment[LightingFixPolicy.EnvironmentVariable] = lightingFix ? "1" : "0";
+        // SteamAPI_RestartAppIfNecessary can otherwise restart a retail build
+        // through Steam and discard the child-only lighting-fix environment.
+        // Match the upstream doomfix launcher; do not write steam_appid.txt.
+        if (lightingFix)
+            startInfo.Environment["SteamAppId"] = "782330";
+        return startInfo;
     }
 }
