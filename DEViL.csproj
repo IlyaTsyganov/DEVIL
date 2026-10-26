@@ -8,11 +8,12 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\devil.ico</ApplicationIcon>
     <AssemblyName>DEViL</AssemblyName>
-    <Version>0.5.0</Version>
+    <Version>0.6.0</Version>
     <RootNamespace>Devil</RootNamespace>
     <PlatformTarget>x64</PlatformTarget>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Remove="Tests\**\*.cs" />
     <Content Include="Assets\devil.ico"
              CopyToOutputDirectory="PreserveNewest"
              TargetPath="Assets\devil.ico" />
@@ -23,5 +24,8 @@
              Condition="Exists('Native\CollisionViewer\bin\DoomCollisionLayer.dll')"
              CopyToOutputDirectory="PreserveNewest"
              TargetPath="Native\CollisionViewer\bin\DoomCollisionLayer.dll" />
+    <Content Include="Native\CollisionViewer\licenses\doomfix-MIT.txt"
+             CopyToOutputDirectory="PreserveNewest"
+             TargetPath="licenses\doomfix-MIT.txt" />
   </ItemGroup>
 </Project>
