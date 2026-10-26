@@ -118,12 +118,22 @@ int main() {
         *toggle=false; expect(collectVertices(camera,vertices)==6&&vertices.size()==10,"independent group toggle"); *toggle=true;
     }
     // Exercise the same readers and filters with all audited retail layouts.
-    for(const GameProfile* selected:{&kProfile11,&kProfile10,&kProfile31,&kProfile51}) {
+    for(const GameProfile* selected:kGameProfiles) {
     const GameProfile& profile=*selected;
+    // The observed 2.x map has header fields before these pointers. Keep the
+    // fixture positions independent of the profile so an eight-byte regression
+    // cannot also move the test data and silently pass.
+    const bool retail2x=selected==&kProfile20||selected==&kProfile21;
+    const uintptr_t fixturePlayerOffset=retail2x?0x1ad8:profile.mapPlayerOffset;
+    const uintptr_t fixtureEntitiesOffset=retail2x?0x61cb8:profile.mapEntitiesOffset;
     auto* base=static_cast<unsigned char*>(VirtualAlloc(nullptr,0x7000000,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE));
     expect(base!=nullptr,"fixture allocation");
     std::vector<unsigned char> system(0x60),map(0x61d00),player(0x4c8a0),menu(0xc8),entity(0x240),physics(0x220),poly(0x200);
     uintptr_t b=reinterpret_cast<uintptr_t>(base),menuAddress=reinterpret_cast<uintptr_t>(menu.data());
+    if(retail2x) {
+        put(map.data(),0x1ad0,uintptr_t(0x50000));
+        put(map.data(),0x61cb0,b+0x123000);
+    }
     IMAGE_DOS_HEADER dos{}; dos.e_magic=IMAGE_DOS_SIGNATURE; dos.e_lfanew=0x80;
     IMAGE_NT_HEADERS64 nt{}; nt.Signature=IMAGE_NT_SIGNATURE; nt.FileHeader.Machine=IMAGE_FILE_MACHINE_AMD64;
     nt.FileHeader.TimeDateStamp=profile.timestamp; nt.OptionalHeader.Magic=IMAGE_NT_OPTIONAL_HDR64_MAGIC; nt.OptionalHeader.SizeOfImage=profile.imageSize;
@@ -133,7 +143,7 @@ int main() {
     base[profile.fingerprintRva]^=1; expect(!detectGameProfile(WallMemory{},b),"mismatched code rejected"); base[profile.fingerprintRva]^=1;
     ++nt.FileHeader.TimeDateStamp; memcpy(base+dos.e_lfanew,&nt,sizeof(nt));
     expect(!detectGameProfile(WallMemory{},b),"unknown executable rejected"); --nt.FileHeader.TimeDateStamp; memcpy(base+dos.e_lfanew,&nt,sizeof(nt));
-    std::vector<unsigned char> renderer(0x5a71b0),view(0x21970);
+    std::vector<unsigned char> renderer(profile.viewsOffset+24),view(std::max(profile.viewMatrixOffset+64,profile.viewPositionOffset+12)+64);
     uintptr_t viewPointer=reinterpret_cast<uintptr_t>(view.data());
     put(base,profile.rendererRva,reinterpret_cast<uintptr_t>(renderer.data()));
     put(renderer.data(),profile.viewsOffset+8,int(1)); put(renderer.data(),profile.viewsOffset,reinterpret_cast<uintptr_t>(&viewPointer));
@@ -156,13 +166,22 @@ int main() {
     const float onScreen[]{-.1f,-.1f,1,.1f,.1f,2},offScreen[]{4,-.1f,1,5,.1f,2},behindCamera[]{-.1f,-.1f,-2,.1f,.1f,-1};
     expect(ViewFilter(observedCamera).inView(onScreen)&&!ViewFilter(observedCamera).inView(offScreen)&&!ViewFilter(observedCamera).inView(behindCamera),"off-screen and rear geometry rejected for both profiles");
     put(base,profile.gameSystemRva,reinterpret_cast<uintptr_t>(system.data())); put(system.data(),0x44,uint32_t(2));
-    put(system.data(),0x50,reinterpret_cast<uintptr_t>(map.data())); put(map.data(),profile.mapPlayerOffset,reinterpret_cast<uintptr_t>(player.data()));
+    put(system.data(),0x50,reinterpret_cast<uintptr_t>(map.data())); put(map.data(),fixturePlayerOffset,reinterpret_cast<uintptr_t>(player.data()));
     put(player.data(),0,b+profile.playerVtableRva); put(player.data(),profile.playerHudOffset+profile.hudMenusOffset,reinterpret_cast<uintptr_t>(&menuAddress)); put(player.data(),profile.playerHudOffset+profile.hudMenusOffset+8,uint32_t(1));
     put(menu.data(),0x90,int(-1)); put(menu.data(),0x94,int(-1));
     WallMemory memory;
-    put(base,profile.consoleRva,b+profile.consoleVtableRva); put(base,profile.consoleRva+0x6080fc,.5f);
+    std::vector<unsigned char> indirectConsole(profile.consoleIndirect?0x608120:0);
+    unsigned char* consoleBase=profile.consoleIndirect?indirectConsole.data():base+profile.consoleRva;
+    if(profile.consoleIndirect) put(base,profile.consoleRva,reinterpret_cast<uintptr_t>(consoleBase));
+    put(consoleBase,0,b+profile.consoleVtableRva); put(consoleBase,0x6080fc,.5f);
     expect(readConsoleFraction(memory,b,profile)==.5f&&consoleClipTop(.5f,100)==52,"console fraction and border");
-    base[profile.consoleRva+0x608108]=1; expect(readConsoleFraction(memory,b,profile)==1,"forced full console"); base[profile.consoleRva+0x608108]=0;
+    consoleBase[0x608108]=1; expect(readConsoleFraction(memory,b,profile)==1,"forced full console"); consoleBase[0x608108]=0;
+    put(consoleBase,0,b+profile.consoleVtableRva+8); expect(readConsoleFraction(memory,b,profile)==0,"incorrect console type rejected");
+    put(consoleBase,0,b+profile.consoleVtableRva);
+    if(profile.consoleIndirect) {
+        put(base,profile.consoleRva,uintptr_t(0)); expect(readConsoleFraction(memory,b,profile)==0,"unavailable console pointer ignored");
+        put(base,profile.consoleRva,reinterpret_cast<uintptr_t>(consoleBase));
+    }
     expect(consoleClipTop(0,100)==0&&consoleClipTop(1,100)==100&&consoleClipTop(-1,100)==0&&consoleClipTop(.1f,100)==12,"console clipping bounds");
     expect(gameplayVisible(memory,b,profile),"gameplay visible");
     put(player.data(),0,b+0x123456); expect(!gameplayVisible(memory,b,profile),"incorrect player type hidden"); put(player.data(),0,b+profile.playerVtableRva);
@@ -171,7 +190,7 @@ int main() {
     put(menu.data(),0x94,int(2)); expect(!gameplayVisible(memory,b,profile),"menu transition hidden"); put(menu.data(),0x94,int(-1));
     put(menu.data(),0x80,int(1)); expect(!gameplayVisible(memory,b,profile),"popup hidden"); put(menu.data(),0x80,int(0));
     put(system.data(),0x44,uint32_t(0)); expect(!gameplayVisible(memory,b,profile),"main menu/loading hidden"); put(system.data(),0x44,uint32_t(2));
-    put(map.data(),profile.mapPlayerOffset,uintptr_t(0)); expect(!gameplayVisible(memory,b,profile),"no level player hidden");
+    put(map.data(),fixturePlayerOffset,uintptr_t(0)); expect(!gameplayVisible(memory,b,profile),"no level player hidden");
     // A live convex wall: activation, removal, respawn and movement use physics state.
     put(poly.data(),0x22,uint8_t(1));
     put(poly.data(),0x20,uint16_t(2));
@@ -188,21 +207,22 @@ int main() {
     put(physics.data(),0x1c0,reinterpret_cast<uintptr_t>(&root));
     float axis[9]{1,0,0,0,1,0,0,0,1},origin[3]{10,20,30}; memcpy(physics.data()+0x8c,axis,36); memcpy(physics.data()+0xb0,origin,12);
     uintptr_t row[4]{1,reinterpret_cast<uintptr_t>(entity.data()),0,0};
-    put(map.data(),profile.mapEntitiesOffset,reinterpret_cast<uintptr_t>(row)); put(map.data(),profile.mapEntitiesOffset+8,uint32_t(1));
+    put(map.data(),fixtureEntitiesOffset,reinterpret_cast<uintptr_t>(row)); put(map.data(),fixtureEntitiesOffset+8,uint32_t(1));
     LiveWalls walls; walls.refresh(b,profile);
     expect(walls.meshes.size()==1&&walls.meshes[0].geometry->triangles.size()==36&&walls.meshes[0].geometry->lines.size()==24,"exact live convex topology");
     expect(walls.meshes[0].bounds[0]==9&&walls.meshes[0].bounds[5]==33,"live world transform");
     put(physics.data(),0x44,uint32_t(0x40000000)); walls.refresh(b,profile); expect(walls.meshes.empty(),"disabled collision disappears");
     put(physics.data(),0x44,uint32_t(8)); entity[0xa4]=1; walls.refresh(b,profile); expect(walls.meshes.empty(),"deleted entity disappears"); entity[0xa4]=0;
-    put(map.data(),profile.mapEntitiesOffset+8,uint32_t(0)); walls.refresh(b,profile); expect(walls.meshes.empty(),"despawned slot disappears");
-    put(map.data(),profile.mapEntitiesOffset+8,uint32_t(1)); put(physics.data(),0xb0,12.f); walls.refresh(b,profile); expect(walls.meshes.size()==1&&walls.meshes[0].bounds[0]==11,"respawn/movement refreshed");
+    put(map.data(),fixtureEntitiesOffset+8,uint32_t(0)); walls.refresh(b,profile); expect(walls.meshes.empty(),"despawned slot disappears");
+    put(map.data(),fixtureEntitiesOffset+8,uint32_t(1)); put(physics.data(),0xb0,12.f); walls.refresh(b,profile); expect(walls.meshes.size()==1&&walls.meshes[0].bounds[0]==11,"respawn/movement refreshed");
     put(physics.data(),0x14,uint32_t(7)); walls.refresh(b,profile); expect(walls.meshes.empty(),"rigid wall outside world hidden");
     physics[0x210]=1; walls.refresh(b,profile); expect(walls.meshes.size()==1,"rigid wall added to world");
-    const uintptr_t triggerVtable=b+0x200000,triggerGetter=b+0x210000,triggerInfo=b+0x220000;
+    const uintptr_t triggerGetterOffset=profile.typeGetterLimitRva-16;
+    const uintptr_t triggerVtable=b+0x200000,triggerGetter=b+triggerGetterOffset,triggerInfo=b+0x220000;
     put(base,0x200000+16,triggerGetter);
     const unsigned char getterCode[]{0x48,0x8d,0x05,0,0,0,0,0xc3};
-    memcpy(base+0x210000,getterCode,sizeof(getterCode));
-    put(base,0x210000+3,static_cast<int32_t>(triggerInfo-(triggerGetter+7)));
+    memcpy(base+triggerGetterOffset,getterCode,sizeof(getterCode));
+    put(base,triggerGetterOffset+3,static_cast<int32_t>(triggerInfo-(triggerGetter+7)));
     const char triggerName[]="idTrigger_Test"; put(base,0x220000,reinterpret_cast<uintptr_t>(triggerName));
     put(entity.data(),0,triggerVtable); put(physics.data(),0x44,uint32_t(0x4000));
     LiveWalls triggers; triggers.refresh(b,profile,true);
@@ -214,7 +234,7 @@ int main() {
     std::vector<unsigned char> havok(0x210c0);
     const std::string mapA="game/dlc2/e5m1_spear/e5m1_spear",mapB="game/dlc/e4m1_rig/e4m1_rig";
     put(map.data(),0x20,reinterpret_cast<uintptr_t>(mapA.c_str())); put(map.data(),0x28,uint32_t(mapA.size()));
-    put(map.data(),profile.mapPlayerOffset,reinterpret_cast<uintptr_t>(player.data())); put(player.data(),0x1d0,reinterpret_cast<uintptr_t>(physics.data()));
+    put(map.data(),fixturePlayerOffset,reinterpret_cast<uintptr_t>(player.data())); put(player.data(),0x1d0,reinterpret_cast<uintptr_t>(physics.data()));
     put(physics.data(),0x80,reinterpret_cast<uintptr_t>(havok.data())); put(havok.data(),0x210b0,reinterpret_cast<uintptr_t>(&root));
     LevelIdentity levelA=readLevelIdentity(memory,b,profile); expect(levelA.name==mapA&&levelA.world==root,"current map identity");
     RuntimeSceneBuilder builder; auto worldA=builder.build(levelA);
