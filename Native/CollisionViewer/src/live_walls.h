@@ -1,5 +1,5 @@
 #pragma once
-// Shared read-only 1.0/1.1/3.1/5.1 layouts: idEntity, idPhysicsProperties, idHavokPhysics_Base;
+// Shared read-only layouts: idEntity, idPhysicsProperties, idHavokPhysics_Base;
 // Havok member offsets also match the map's embedded TAG0 type descriptions.
 #include "native_profile.h"
 // DOOM stores gameplay contents beside each Havok shape in an engine-owned
@@ -221,12 +221,12 @@ struct LiveWalls {
         }
         return true;
     }
-    bool triggerType(uintptr_t vtable,uintptr_t base) {
+    bool triggerType(uintptr_t vtable,uintptr_t base,const GameProfile& profile) {
         auto found=triggerTypes.find(vtable); if(found!=triggerTypes.end()) return found->second;
         uintptr_t getter=0,info=0,name=0; unsigned char code[8]{}; char text[96]{};
         bool result=false;
         if(vtable>=base&&vtable<base+0x7000000&&memory.get(vtable+16,getter)&&
-           getter>=base&&getter<base+0x2500000&&memory.read(getter,code,8)&&
+           getter>=base&&getter<base+profile.typeGetterLimitRva&&memory.read(getter,code,8)&&
            code[0]==0x48&&code[1]==0x8d&&code[2]==0x05&&code[7]==0xc3) {
             int32_t displacement=0; memcpy(&displacement,code+3,4); info=getter+7+displacement;
             if(memory.get(info,name)&&memory.read(name,text,sizeof(text)-1))
@@ -247,7 +247,7 @@ struct LiveWalls {
             ++entitiesExamined;
             uintptr_t vtable=0;
             if(!memory.get(entry.entity,vtable)) continue;
-            bool trigger=includeTriggers&&triggerType(vtable,base);
+            bool trigger=includeTriggers&&triggerType(vtable,base,profile);
             if(!trigger&&vtable!=base+profile.wallVtableRva) continue;
             unsigned char entity[0x240]{},physics[0x208]{}; uintptr_t physicsAddress=0;
             if(!memory.read(entry.entity,entity,sizeof(entity))||entity[0xa4]) continue;

@@ -2,10 +2,11 @@
 static float readConsoleFraction(const WallMemory& memory,uintptr_t base,const GameProfile& profile) {
     // idConsoleLocal is embedded in the engine singleton. DrawSolidConsole
     // multiplies displayFrac (+6080fc) by the current framebuffer height.
-    const uintptr_t consoleRva=profile.consoleRva;
+    uintptr_t console=base+profile.consoleRva;
+    if(profile.consoleIndirect&&(!memory.get(console,console)||!console)) return 0;
     uintptr_t vtable=0; float fraction=0; unsigned char forced=0;
-    if(!memory.get(base+consoleRva,vtable)||vtable!=base+profile.consoleVtableRva||
-       !memory.get(base+consoleRva+0x6080fc,fraction)||!memory.get(base+consoleRva+0x608108,forced)) return 0;
+    if(!memory.get(console,vtable)||vtable!=base+profile.consoleVtableRva||
+       !memory.get(console+0x6080fc,fraction)||!memory.get(console+0x608108,forced)) return 0;
     if(forced) return 1;
     return std::isfinite(fraction)?std::clamp(fraction,0.0f,1.0f):1.0f;
 }

@@ -603,7 +603,7 @@ static bool draw(Swapchain& swap,VkQueue queue,uint32_t imageIndex,const VkPrese
     else if(smokeTest()) { camera.matrix[0]=camera.matrix[5]=camera.matrix[10]=camera.matrix[15]=1; }
     else if(!profile||!readGameCamera(WallMemory{},gameBase,*profile,camera)) {
         static ULONGLONG last=0;
-        if(GetTickCount64()-last>5000) { note(profile?"Waiting for a valid supported level camera.":"No supported DOOM Eternal 1.0/1.1/3.1/5.1 executable profile detected; overlay withheld."); last=GetTickCount64(); }
+        if(GetTickCount64()-last>5000) { note(profile?"Waiting for a valid supported level camera.":"No supported DOOM Eternal executable profile detected; overlay withheld."); last=GetTickCount64(); }
         return false;
     }
     if(!smokeTest()&&!sceneTest()&&!occlusionCase()) {

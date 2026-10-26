@@ -1,5 +1,5 @@
 #pragma once
-// Audited retail 1.0/1.1/3.1/5.1 idGameSystemLocal/idPlayer/idHUD/idMenu layouts.
+// Audited idGameSystemLocal/idPlayer/idHUD/idMenu layouts, selected by profile.
 // Missing/unloading game state is deliberately treated as a menu/loading screen.
 static bool gameplayVisible(const WallMemory& memory,uintptr_t base,const GameProfile& profile) {
     uintptr_t system=0,map=0,player=0,vtable=0;
