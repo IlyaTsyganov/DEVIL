@@ -31,6 +31,7 @@ extern "C" {
 #include "game_camera.h"
 #include "shaders_spirv.h"
 #include "depth_state.h"
+#include "lighting_fix.h"
 
 #define EXPORT extern "C" __declspec(dllexport)
 static constexpr char kLayerName[]="VK_LAYER_DOOM_collision";
@@ -156,7 +157,7 @@ struct Instance {
  X(CreateImage) X(DestroyImage) X(GetImageMemoryRequirements) X(BindImageMemory) X(CreateDescriptorSetLayout) X(DestroyDescriptorSetLayout) X(CreateDescriptorPool) X(DestroyDescriptorPool) X(AllocateDescriptorSets) X(UpdateDescriptorSets) X(CreateSampler) X(DestroySampler) X(CmdBindDescriptorSets) \
  X(CmdNextSubpass) X(CmdExecuteCommands) X(FreeCommandBuffers) X(CmdBeginRendering) X(CmdEndRendering) X(CmdBeginRenderingKHR) X(CmdEndRenderingKHR) \
  X(CreateRenderPass2) X(CreateRenderPass2KHR) X(CmdBeginRenderPass2) X(CmdBeginRenderPass2KHR) X(CmdNextSubpass2) X(CmdNextSubpass2KHR) X(CmdEndRenderPass2) X(CmdEndRenderPass2KHR) \
- X(CmdPipelineBarrier2) X(CmdPipelineBarrier2KHR) X(QueueSubmit2) X(QueueSubmit2KHR)
+ X(CmdPipelineBarrier2) X(CmdPipelineBarrier2KHR) X(QueueSubmit2) X(QueueSubmit2KHR) X(CmdWaitEvents)
 
 struct Device {
     VkDevice handle{};
@@ -171,6 +172,9 @@ struct Device {
     DEPTH_FUNCTIONS(DECLARE)
 #undef DECLARE
     DepthState depth;
+    bool lightingFix=false;
+    uint64_t lightingPatched=0;
+    ULONGLONG lightingLastReport=0;
 };
 struct Queue { Device* device; uint32_t family; };
 struct Frame {
@@ -795,6 +799,13 @@ EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physical,c
         DEPTH_FUNCTIONS(LOAD)
 #undef LOAD
         data->instance->memoryProperties(physical,&data->memory);
+        auto properties=reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(data->instance->gipa(data->instance->handle,"vkGetPhysicalDeviceProperties"));
+        VkPhysicalDeviceProperties gpu{}; properties(physical,&gpu);
+        const GameProfile* profile=currentGameProfile();
+        const bool lightingTest=smokeTest()&&GetEnvironmentVariableW(L"DCV_TEST_LIGHTING_FIX",nullptr,0)>0;
+        data->lightingFix=lightingFixEligible(profile,gpu.vendorID,lightingFixRequested())||lightingTest;
+        char lightingMessage[400]; sprintf_s(lightingMessage,"Lighting fix: %s; profile=%s vendor=0x%x pid=%lu%s.",
+            data->lightingFix?"on":"off",profile?profile->name:"unsupported",gpu.vendorID,GetCurrentProcessId(),lightingTest?" (isolated GPU test)":""); note(lightingMessage);
         uint32_t count=0; data->instance->queueProperties(physical,&count,nullptr); data->families.resize(count); data->instance->queueProperties(physical,&count,data->families.data());
         devices[key(*device)]=std::move(data); note("Vulkan device connected.");
     }
@@ -883,6 +894,7 @@ static PFN_vkVoidFunction interception(const char* name) {
     ENTRY(vkCmdBeginRenderPass) ENTRY(vkCmdEndRenderPass) ENTRY(vkCmdNextSubpass) ENTRY(vkCmdExecuteCommands)
     ENTRY(vkCmdBeginRenderPass2) ENTRY(vkCmdBeginRenderPass2KHR) ENTRY(vkCmdEndRenderPass2) ENTRY(vkCmdEndRenderPass2KHR) ENTRY(vkCmdNextSubpass2) ENTRY(vkCmdNextSubpass2KHR)
     ENTRY(vkCmdPipelineBarrier) ENTRY(vkCmdPipelineBarrier2) ENTRY(vkCmdPipelineBarrier2KHR) ENTRY(vkQueueSubmit) ENTRY(vkQueueSubmit2) ENTRY(vkQueueSubmit2KHR)
+    ENTRY(vkCmdWaitEvents)
     ENTRY(vkCmdBeginRendering) ENTRY(vkCmdBeginRenderingKHR) ENTRY(vkCmdEndRendering) ENTRY(vkCmdEndRenderingKHR)
 #undef ENTRY
     return nullptr;

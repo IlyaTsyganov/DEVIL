@@ -142,7 +142,23 @@ template<class Barrier> static void rememberBarriers(Device& d,VkCommandBuffer c
     }
 }
 EXPORT VKAPI_ATTR void VKAPI_CALL vkCmdPipelineBarrier(VkCommandBuffer command,VkPipelineStageFlags src,VkPipelineStageFlags dst,VkDependencyFlags flags,uint32_t memoryCount,const VkMemoryBarrier* memory,uint32_t bufferCount,const VkBufferMemoryBarrier* buffers,uint32_t imageCount,const VkImageMemoryBarrier* images) {
-    std::lock_guard<std::recursive_mutex> lock(guard); Device& d=*commandDevice(command); rememberBarriers(d,command,imageCount,images); d.CmdPipelineBarrier(command,src,dst,flags,memoryCount,memory,bufferCount,buffers,imageCount,images);
+    std::lock_guard<std::recursive_mutex> lock(guard); Device& d=*commandDevice(command); rememberBarriers(d,command,imageCount,images);
+    LightingBarrierPatch patch(d.lightingFix,src,dst,memoryCount,memory,bufferCount,buffers);
+    if(patch.changed) {
+        ++d.lightingPatched;
+        const ULONGLONG now=GetTickCount64();
+        if(d.lightingPatched==1||now-d.lightingLastReport>=5000) {
+            char text[180]; sprintf_s(text,"Lighting fix: patched vkCmdPipelineBarrier; total=%llu.",d.lightingPatched); note(text); d.lightingLastReport=now;
+        }
+    }
+    d.CmdPipelineBarrier(command,src,dst,flags,patch.memoryCount,patch.memory,bufferCount,patch.buffers,imageCount,images);
+}
+EXPORT VKAPI_ATTR void VKAPI_CALL vkCmdWaitEvents(VkCommandBuffer command,uint32_t eventCount,const VkEvent* events,VkPipelineStageFlags src,VkPipelineStageFlags dst,uint32_t memoryCount,const VkMemoryBarrier* memory,uint32_t bufferCount,const VkBufferMemoryBarrier* buffers,uint32_t imageCount,const VkImageMemoryBarrier* images) {
+    std::lock_guard<std::recursive_mutex> lock(guard); Device& d=*commandDevice(command); rememberBarriers(d,command,imageCount,images);
+    // The source stage mask must still match vkCmdSetEvent.
+    LightingBarrierPatch patch(d.lightingFix,src,dst,memoryCount,memory,bufferCount,buffers);
+    if(patch.changed) { ++d.lightingPatched; if(d.lightingPatched==1) note("Lighting fix: patched vkCmdWaitEvents."); }
+    d.CmdWaitEvents(command,eventCount,events,src,dst,patch.memoryCount,patch.memory,bufferCount,patch.buffers,imageCount,images);
 }
 #define BARRIER2(name) \
 EXPORT VKAPI_ATTR void VKAPI_CALL vk##name(VkCommandBuffer command,const VkDependencyInfo* info) { \
