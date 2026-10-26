@@ -29,6 +29,8 @@ internal sealed class MainForm : Form
     private readonly Label _desruStatus = new();
     private readonly Label _viewerStatus = new();
     private readonly Label _pathValue = new();
+    private readonly Label _gameVersion = new();
+    private readonly ToolTip _gamePathToolTip = new() { AutoPopDelay = 30000, InitialDelay = 400, ReshowDelay = 100, ShowAlways = true };
     private readonly CheckBox _viewerEnabled = new();
     private readonly CheckBox _triggers = new();
     private readonly CheckBox _worldCollision = new();
@@ -77,7 +79,7 @@ internal sealed class MainForm : Form
         RefreshProcessStatus();
         _refreshTimer.Tick += (_, _) => RefreshProcessStatus();
         _refreshTimer.Start();
-        FormClosed += (_, _) => { _refreshTimer.Stop(); _refreshTimer.Dispose(); _fonts.Dispose(); };
+        FormClosed += (_, _) => { _refreshTimer.Stop(); _refreshTimer.Dispose(); _gamePathToolTip.Dispose(); _fonts.Dispose(); };
     }
 
     private void BuildMainPage()
@@ -184,8 +186,11 @@ internal sealed class MainForm : Form
         AddSection(content, "GAME", 324, 192, 310);
         var game = AddCard(content, 324, 216, 310, 178);
         _pathValue.AutoSize = false;
-        _pathValue.Size = new Size(286, 36);
-        _pathValue.MaximumSize = new Size(286, 36);
+        _pathValue.Size = new Size(286, 24);
+        _pathValue.MaximumSize = new Size(286, 24);
+        _pathValue.AutoEllipsis = true;
+        _pathValue.UseMnemonic = false;
+        _pathValue.TextAlign = ContentAlignment.MiddleLeft;
         _pathValue.ForeColor = ForegroundColor;
         _pathValue.Font = UiFont(9f);
         _pathValue.Location = new Point(8, 8);
@@ -195,9 +200,16 @@ internal sealed class MainForm : Form
         browse.Margin = Padding.Empty;
         browse.Click += (_, _) => BrowseForGame();
         game.Controls.Add(browse);
+        _gameVersion.AutoSize = false;
+        _gameVersion.Size = new Size(286, 24);
+        _gameVersion.Font = UiBoldFont(9.5f);
+        _gameVersion.ForeColor = ForegroundColor;
+        _gameVersion.Location = new Point(8, 96);
+        _gameVersion.TextAlign = ContentAlignment.MiddleLeft;
+        game.Controls.Add(_gameVersion);
         _launchButton.Text = "LAUNCH DOOM ETERNAL";
         StyleButton(_launchButton, 284, 32, ControlColor);
-        _launchButton.Location = new Point(8, 96);
+        _launchButton.Location = new Point(8, 138);
         _launchButton.Margin = Padding.Empty;
         _launchButton.Click += (_, _) => LaunchGame();
         game.Controls.Add(_launchButton);
@@ -235,7 +247,7 @@ internal sealed class MainForm : Form
         int distance = Math.Clamp(_settings.ViewDistanceMeters, _distance.Minimum, _distance.Maximum);
         _distance.Value = distance;
         _distanceInput.Value = distance;
-        _pathValue.Text = string.IsNullOrWhiteSpace(_settings.GameExecutablePath) ? "No game executable selected" : _settings.GameExecutablePath;
+        UpdateGameSelection();
         UpdateViewerControls();
     }
 
@@ -277,8 +289,30 @@ internal sealed class MainForm : Form
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
         _settings.GameExecutablePath = dialog.FileName;
-        _pathValue.Text = dialog.FileName;
+        UpdateGameSelection();
         SaveSettings();
+    }
+
+    private void UpdateGameSelection()
+    {
+        string path = _settings.GameExecutablePath;
+        bool selected = !string.IsNullOrWhiteSpace(path);
+        _pathValue.Text = selected ? path : "No game executable selected";
+        _gamePathToolTip.SetToolTip(_pathValue, selected ? path : null);
+        if (!selected)
+        {
+            _gameVersion.Text = "Version: —";
+            return;
+        }
+        try
+        {
+            var info = GameExecutableInfo.Read(path);
+            _gameVersion.Text = "Version: " + (info?.Version ?? "Unknown");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            _gameVersion.Text = "Version: Unavailable";
+        }
     }
 
     private void LaunchGame()
