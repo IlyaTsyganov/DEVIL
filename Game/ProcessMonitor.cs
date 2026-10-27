@@ -6,11 +6,14 @@ public sealed record ProcessSnapshot(bool GameRunning, int GameCount, bool Desru
     DateTime CheckedAt)
 {
     public bool GameStartedBeforeViewer { get; init; }
+    public bool ViewerVersionChecked { get; init; }
+    public bool ViewerUpdateRequired { get; init; }
+    public string[] LoadedViewerLibraries { get; init; } = [];
 }
 
 /// <summary>
-/// Detects the game and DESRU by process metadata only. It never requests memory
-/// access, writes to a process, or starts and stops another process.
+/// Detects the game, DESRU and loaded viewer build using read-only process/module
+/// metadata. It never writes to, starts or stops another process.
 /// </summary>
 public sealed class ProcessMonitor
 {
@@ -35,19 +38,42 @@ public sealed class ProcessMonitor
         "DESpeedrunUtil"
     ];
 
-    public ProcessSnapshot ReadSnapshot()
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    public ProcessSnapshot ReadSnapshot(string? expectedViewerLibrary = null)
     {
         bool gameStartedBeforeViewer = false;
+        int inspected = 0;
+        bool outdated = false;
+        var loadedViewers = new List<string>();
         int gameCount = CountProcesses(GameProcessNames, process =>
         {
             if (process.StartTime.ToUniversalTime() < _viewerStartedAtUtc)
                 gameStartedBeforeViewer = true;
+            if (string.IsNullOrEmpty(expectedViewerLibrary)) return;
+            var names = process.Modules.Cast<ProcessModule>().Select(module => module.ModuleName)
+                .Where(IsViewerLibrary).ToArray();
+            loadedViewers.AddRange(names);
+            ++inspected;
+            outdated |= !UsesExpectedViewer(names, expectedViewerLibrary);
         });
         int desruCount = CountProcesses(DesruProcessNames);
         return new ProcessSnapshot(gameCount > 0, gameCount, desruCount > 0, desruCount, DateTime.Now)
         {
-            GameStartedBeforeViewer = gameStartedBeforeViewer
+            GameStartedBeforeViewer = gameStartedBeforeViewer,
+            ViewerVersionChecked = gameCount > 0 && inspected == gameCount,
+            ViewerUpdateRequired = outdated,
+            LoadedViewerLibraries = loadedViewers.ToArray()
         };
+    }
+
+    private static bool IsViewerLibrary(string name) =>
+        name.StartsWith("DoomCollisionLayer", StringComparison.OrdinalIgnoreCase) &&
+        name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase);
+
+    internal static bool UsesExpectedViewer(IEnumerable<string> loadedModules, string expectedLibrary)
+    {
+        string[] viewers = loadedModules.Where(IsViewerLibrary).ToArray();
+        return viewers.Length == 1 && viewers[0].Equals(expectedLibrary, StringComparison.OrdinalIgnoreCase);
     }
 
     public bool IsGameRunning => CountProcesses(GameProcessNames) > 0;

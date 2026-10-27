@@ -21,6 +21,15 @@ public sealed class VulkanLayerRegistration
     public VulkanLayerRegistration(SettingsStore settingsStore) => _settingsStore = settingsStore;
 
     public string RuntimeDirectory => Path.Combine(_settingsStore.SettingsDirectory, "viewer-runtime");
+    public string ExpectedRuntimeLibraryName
+    {
+        get
+        {
+            string dllPath = Path.Combine(AppContext.BaseDirectory, "Native", "CollisionViewer", "bin", "DoomCollisionLayer.dll");
+            byte[] hash = SHA256.HashData(File.ReadAllBytes(dllPath));
+            return $"DoomCollisionLayer-{Convert.ToHexString(hash)[..16].ToLowerInvariant()}.dll";
+        }
+    }
     private string LayerManifestPath => Path.Combine(RuntimeDirectory, "DoomCollisionLayer.json");
     private string OverrideManifestPath => Path.Combine(RuntimeDirectory, "DoomCollisionOverride.json");
 
@@ -90,8 +99,7 @@ public sealed class VulkanLayerRegistration
             throw new FileNotFoundException("Collision Viewer has not been built yet. Build Native\\CollisionViewer\\build-viewer.cmd.", dllPath);
 
         Directory.CreateDirectory(RuntimeDirectory);
-        byte[] dllHash = SHA256.HashData(File.ReadAllBytes(dllPath));
-        string runtimeDllName = $"DoomCollisionLayer-{Convert.ToHexString(dllHash)[..16].ToLowerInvariant()}.dll";
+        string runtimeDllName = ExpectedRuntimeLibraryName;
         string destinationDll = Path.Combine(RuntimeDirectory, runtimeDllName);
         // Keep each built layer version side by side. Windows cannot replace a
         // DLL while a game process has it loaded; the manifest can safely move
