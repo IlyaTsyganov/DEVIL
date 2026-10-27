@@ -35,12 +35,23 @@ internal sealed class MainForm : Form
     private readonly CheckBox _triggers = new();
     private readonly CheckBox _worldCollision = new();
     private readonly CheckBox _invisibleWalls = new();
+    private readonly CheckBox _inspector = new();
+    private readonly CheckBox _disabledVolumes = new();
+    private readonly CheckBox _volumeHistory = new();
+    private readonly Button _triggerTypes = new();
     private readonly RadioButton _outlines = new();
     private readonly RadioButton _filled = new();
     private readonly TrackBar _distance = new();
     private readonly NumericUpDown _distanceInput = new();
     private readonly Button _launchButton = new();
     private bool _syncingDistance;
+    private bool _loadingControls;
+    private ActiveEncountersForm? _activeEncounters;
+    private EntityGraphForm? _entityGraph;
+    private MovementLabForm? _movementLab;
+    private LevelStateForm? _levelStates;
+    private ResearchPointsForm? _researchPoints;
+    private PracticeSaveForm? _practiceSaves;
 
     [DllImport("user32.dll")]
     private static extern bool ReleaseCapture();
@@ -57,7 +68,7 @@ internal sealed class MainForm : Form
 
         Text = "DEViL — DOOM Eternal Visualization & Inspection Layer";
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(651, 513);
+        ClientSize = new Size(651, 697);
         FormBorderStyle = FormBorderStyle.None;
         ControlBox = false;
         MaximizeBox = false;
@@ -119,17 +130,17 @@ internal sealed class MainForm : Form
         var scroll = new Panel
         {
             Location = new Point(6, 63),
-            Size = new Size(644, 450),
+            Size = new Size(644, 634),
             Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
             AutoScroll = true,
             BackColor = Canvas
         };
         Controls.Add(scroll);
-        var content = new Panel { Location = Point.Empty, Size = new Size(640, 448), BackColor = Canvas };
+        var content = new Panel { Location = Point.Empty, Size = new Size(640, 632), BackColor = Canvas };
         scroll.Controls.Add(content);
 
         AddSection(content, "COLLISION VIEWER", 5, 14, 310);
-        var viewer = AddCard(content, 5, 38, 310, 140);
+        var viewer = AddCard(content, 5, 38, 310, 204);
         ConfigureCheck(_viewerEnabled, "Enable Collision Viewer", 11.25f);
         Place(viewer, _viewerEnabled, 8, 8);
         var caption = new Label { Text = "Collision types", AutoSize = true, ForeColor = ForegroundColor, Font = UiFont(10f), Location = new Point(8, 36) };
@@ -138,16 +149,33 @@ internal sealed class MainForm : Form
         ConfigureCheck(_worldCollision, "World collision", 10.5f);
         ConfigureCheck(_invisibleWalls, "Invisible walls", 10.5f);
         Place(viewer, _triggers, 20, 58);
-        Place(viewer, _worldCollision, 20, 82);
-        Place(viewer, _invisibleWalls, 20, 106);
+        _triggerTypes.Text = "Trigger types…";
+        StyleButton(_triggerTypes, 166, 26, ControlColor);
+        Place(viewer, _triggerTypes, 128, 57);
+        _triggerTypes.Click += (_, _) =>
+        {
+            using var dialog = new TriggerTypesForm(_settings, _settingsStore.TriggerClassesPath, SaveSettings);
+            dialog.ShowDialog(this);
+        };
+        _gamePathToolTip.SetToolTip(_triggerTypes, "Show or hide each trigger class independently. Search by class or description; changes are saved and applied live.");
+        Place(viewer, _worldCollision, 20, 86);
+        Place(viewer, _invisibleWalls, 20, 114);
+        ConfigureCheck(_disabledVolumes, "Show disabled volumes", 10f);
+        ConfigureCheck(_volumeHistory, "Show recent changes", 10f);
+        Place(viewer, _disabledVolumes, 8, 142);
+        Place(viewer, _volumeHistory, 8, 170);
+        _gamePathToolTip.SetToolTip(_disabledVolumes, "Show inactive volumes as pale outlines. When current geometry is unavailable, a previously observed shape is marked as a snapshot in the inspector.");
+        _gamePathToolTip.SetToolTip(_volumeHistory, "Flash enabled/disabled changes for 2 seconds. Show removed or unreadable volumes as dashed snapshots for up to 15 seconds.");
         AddSection(content, "INFO PANEL", 324, 14, 310);
-        var info = AddCard(content, 324, 38, 310, 140);
+        var info = AddCard(content, 324, 38, 310, 204);
         Place(info, StatusRow("DOOM Eternal", _gameStatus), 8, 6);
         Place(info, StatusRow("DESRU", _desruStatus), 8, 50);
         Place(info, StatusRow("Collision Viewer", _viewerStatus), 8, 94);
+        info.Controls.Add(new Label { Text = "Disabled: pale outline\nChanges: green / pink flash\nRemoved / unknown: dashed (15s)",
+            AutoSize = false, Size = new Size(286, 56), Font = UiFont(8.5f), ForeColor = Color.Gainsboro, Location = new Point(8, 140) });
 
-        AddSection(content, "RENDER SETTINGS", 5, 192, 310);
-        var render = AddCard(content, 5, 216, 310, 178);
+        AddSection(content, "RENDER SETTINGS", 5, 256, 310);
+        var render = AddCard(content, 5, 280, 310, 178);
         ConfigureRadio(_outlines, "Outlines");
         ConfigureRadio(_filled, "Filled");
         Place(render, _outlines, 8, 8);
@@ -173,18 +201,14 @@ internal sealed class MainForm : Form
         render.Controls.Add(_distanceInput);
         render.Controls.Add(new Label { Text = "20 m", AutoSize = true, ForeColor = ForegroundColor, Font = UiFont(9f), Location = new Point(8, 108) });
         render.Controls.Add(new Label { Text = "200 m", AutoSize = true, ForeColor = ForegroundColor, Font = UiFont(9f), Location = new Point(240, 108) });
-        render.Controls.Add(new Label
-        {
-            Text = "Greater view distance may reduce game performance.",
-            AutoSize = false,
-            Size = new Size(280, 34),
-            ForeColor = Color.Gainsboro,
-            Font = UiFont(9f),
-            Location = new Point(8, 134)
-        });
+        ConfigureCheck(_inspector, "Volume inspector (meathook)", 10f);
+        Place(render, _inspector, 8, 130);
+        _gamePathToolTip.SetToolTip(_inspector, "Aim at a visible trigger or invisible wall. Entity details use the game's native debug HUD. Requires a compatible meathook with mh_api_get. Greater view distance may reduce performance.");
+        render.Controls.Add(new Label { Text = "Native game HUD; requires meathook API.", AutoSize = true,
+            ForeColor = Color.Gainsboro, Font = UiFont(8f), Location = new Point(8, 156) });
 
-        AddSection(content, "GAME", 324, 192, 310);
-        var game = AddCard(content, 324, 216, 310, 178);
+        AddSection(content, "GAME", 324, 256, 310);
+        var game = AddCard(content, 324, 280, 310, 178);
         _pathValue.AutoSize = false;
         _pathValue.Size = new Size(286, 24);
         _pathValue.MaximumSize = new Size(286, 24);
@@ -214,23 +238,89 @@ internal sealed class MainForm : Form
         _launchButton.Click += (_, _) => LaunchGame();
         game.Controls.Add(_launchButton);
 
+        var research = MakeButton("Research timeline & path…", 310, 30);
+        research.UseMnemonic = false;
+        research.Location = new Point(5, 472);
+        research.Click += (_, _) =>
+        {
+            using var dialog = new ResearchForm(_settings, _settingsStore.SettingsDirectory, SaveSettings, SelectedGameProcess);
+            dialog.ShowDialog(this);
+        };
+        content.Controls.Add(research);
+        var encounters = MakeButton("Active encounters…", 152, 30);
+        encounters.Location = new Point(325, 472);
+        encounters.Click += (_, _) =>
+        {
+            if (_activeEncounters is null || _activeEncounters.IsDisposed)
+            {
+                _activeEncounters = new ActiveEncountersForm(_settings, _settingsStore.SettingsDirectory, SaveSettings, SelectedGameProcess);
+                _activeEncounters.Show(this);
+            }
+            else _activeEncounters.Activate();
+        };
+        content.Controls.Add(encounters);
+        var graph = MakeButton("Entity links…", 152, 30);
+        graph.Location = new Point(483, 472);
+        graph.Click += (_, _) =>
+        {
+            if (_entityGraph is null || _entityGraph.IsDisposed)
+            {
+                _entityGraph = new EntityGraphForm(_settingsStore.SettingsDirectory, SelectedGameProcess);
+                _entityGraph.Show(this);
+            }
+            else _entityGraph.Activate();
+        };
+        content.Controls.Add(graph);
+        var movement = MakeButton("Movement lab…", 310, 30);
+        movement.Location = new Point(5, 512);
+        movement.Click += (_, _) =>
+        {
+            if (_movementLab is null || _movementLab.IsDisposed)
+            { _movementLab = new MovementLabForm(_settings, _settingsStore.SettingsDirectory, SaveSettings, SelectedGameProcess); _movementLab.Show(this); }
+            else _movementLab.Activate();
+        };
+        content.Controls.Add(movement);
+        var states = MakeButton("Level state: before / after…", 310, 30);
+        states.Location = new Point(325, 512);
+        states.Click += (_, _) =>
+        {
+            if (_levelStates is null || _levelStates.IsDisposed) { _levelStates = new LevelStateForm(_settingsStore.SettingsDirectory, SelectedGameProcess); _levelStates.Show(this); }
+            else _levelStates.Activate();
+        };
+        content.Controls.Add(states);
+        var points = MakeButton("Research points…", 310, 30);
+        points.Location = new Point(5, 552);
+        points.Click += (_, _) =>
+        {
+            if (_researchPoints is null || _researchPoints.IsDisposed) { _researchPoints = new ResearchPointsForm(_settingsStore.SettingsDirectory, SelectedGameProcess); _researchPoints.Show(this); }
+            else _researchPoints.Activate();
+        };
+        content.Controls.Add(points);
+        var saves = MakeButton("Сохранения…", 310, 30);
+        saves.Location = new Point(325, 552);
+        saves.Click += (_, _) =>
+        {
+            if (_practiceSaves is null || _practiceSaves.IsDisposed) { _practiceSaves = new PracticeSaveForm(_settingsStore.SettingsDirectory, gameProcess: SelectedGameProcess); _practiceSaves.Show(this); }
+            else _practiceSaves.Activate();
+        };
+        content.Controls.Add(saves);
         var downloadDesru = MakeButton("Download DESRU", 152, 30);
-        downloadDesru.Location = new Point(5, 408);
+        downloadDesru.Location = new Point(5, 592);
         downloadDesru.Margin = Padding.Empty;
         downloadDesru.Click += (_, _) => OpenLink("https://github.com/bowsr/DESRU/releases/latest");
         content.Controls.Add(downloadDesru);
         var discord = MakeButton("MDSR Discord", 152, 30);
-        discord.Location = new Point(164, 408);
+        discord.Location = new Point(164, 592);
         discord.Margin = Padding.Empty;
         discord.Click += (_, _) => OpenLink("https://discord.gg/dtDa9VZ");
         content.Controls.Add(discord);
         var help = MakeButton("Help", 152, 30);
-        help.Location = new Point(323, 408);
+        help.Location = new Point(323, 592);
         help.Margin = Padding.Empty;
         help.Click += (_, _) => ShowHelp();
         content.Controls.Add(help);
         var exit = MakeButton("Exit", 152, 30);
-        exit.Location = new Point(482, 408);
+        exit.Location = new Point(482, 592);
         exit.Margin = Padding.Empty;
         exit.Click += (_, _) => Close();
         content.Controls.Add(exit);
@@ -242,6 +332,9 @@ internal sealed class MainForm : Form
         _triggers.Checked = _settings.ShowTriggers;
         _worldCollision.Checked = _settings.ShowWorldCollision;
         _invisibleWalls.Checked = _settings.ShowInvisibleWalls;
+        _inspector.Checked = _settings.InspectVolumes;
+        _disabledVolumes.Checked = _settings.ShowDisabledVolumes;
+        _volumeHistory.Checked = _settings.ShowVolumeHistory;
         _outlines.Checked = _settings.Style == RenderStyle.Outlines;
         _filled.Checked = _settings.Style == RenderStyle.Filled;
         int distance = Math.Clamp(_settings.ViewDistanceMeters, _distance.Minimum, _distance.Maximum);
@@ -257,6 +350,9 @@ internal sealed class MainForm : Form
         _triggers.CheckedChanged += (_, _) => { _settings.ShowTriggers = _triggers.Checked; SaveSettings(); };
         _worldCollision.CheckedChanged += (_, _) => { _settings.ShowWorldCollision = _worldCollision.Checked; SaveSettings(); };
         _invisibleWalls.CheckedChanged += (_, _) => { _settings.ShowInvisibleWalls = _invisibleWalls.Checked; SaveSettings(); };
+        _inspector.CheckedChanged += (_, _) => { _settings.InspectVolumes = _inspector.Checked; SaveSettings(); };
+        _disabledVolumes.CheckedChanged += (_, _) => { _settings.ShowDisabledVolumes = _disabledVolumes.Checked; SaveSettings(); };
+        _volumeHistory.CheckedChanged += (_, _) => { _settings.ShowVolumeHistory = _volumeHistory.Checked; SaveSettings(); };
         _outlines.CheckedChanged += (_, _) => { if (_outlines.Checked) { _settings.Style = RenderStyle.Outlines; SaveSettings(); } };
         _filled.CheckedChanged += (_, _) => { if (_filled.Checked) { _settings.Style = RenderStyle.Filled; SaveSettings(); } };
         _distance.ValueChanged += (_, _) =>
@@ -331,6 +427,7 @@ internal sealed class MainForm : Form
 
     private void SaveSettings()
     {
+        if (_loadingControls) return;
         try
         {
             _settingsStore.Save(_settings);
@@ -345,17 +442,65 @@ internal sealed class MainForm : Form
         }
     }
 
+    private int SelectedGameProcess()
+    {
+        int selected = 0;
+        foreach (Process process in Process.GetProcessesByName("DOOMEternalx64vk"))
+        {
+            using (process)
+            {
+                try
+                {
+                    if (!string.Equals(process.MainModule?.FileName, _settings.GameExecutablePath, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (selected != 0) return 0;
+                    selected = process.Id;
+                }
+                catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception) { }
+            }
+        }
+        return selected;
+    }
+
+    internal void ReceiveLabCommand(int process, string[] args)
+    {
+        if (!IsHandleCreated || IsDisposed) return;
+        BeginInvoke(() =>
+        {
+            if (IsDisposed || SelectedGameProcess() != process) return;
+            if (!LabCommands.Apply(_settings, args, process, DateTime.UtcNow.Ticks)) return;
+            _loadingControls = true;
+            try { LoadSettingsIntoControls(); }
+            finally { _loadingControls = false; }
+            SaveSettings();
+        });
+    }
+
+    internal void StopResearchOnExit()
+    {
+        if (!_settings.RecordResearch) return;
+        _settings.RecordResearch = false;
+        try { _settingsStore.Save(_settings); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+    }
+
     private void RefreshProcessStatus()
     {
-        var snapshot = _processMonitor.ReadSnapshot();
+        string? expectedViewer = null;
+        try { expectedViewer = _layerRegistration.ExpectedRuntimeLibraryName; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException) { }
+        var snapshot = _processMonitor.ReadSnapshot(expectedViewer);
         SetStatus(_gameStatus, snapshot.GameRunning ? "Running" : "Not running", snapshot.GameRunning);
         SetStatus(_desruStatus, snapshot.DesruRunning ? "Running" : "Not running", snapshot.DesruRunning);
         bool viewerEnabled = _settings.CollisionViewerEnabled;
-        bool restartRequired = viewerEnabled && snapshot.GameRunning && snapshot.GameStartedBeforeViewer;
+        bool restartRequired = viewerEnabled && snapshot.GameRunning &&
+            (snapshot.ViewerUpdateRequired || (!snapshot.ViewerVersionChecked && snapshot.GameStartedBeforeViewer));
         string viewerStatus = !viewerEnabled ? "Disabled"
-            : restartRequired ? "Restart game"
+            : restartRequired ? (snapshot.ViewerUpdateRequired ? "Update pending" : "Restart game")
             : snapshot.GameRunning ? "Running" : "Enabled";
         SetStatus(_viewerStatus, viewerStatus, viewerEnabled, restartRequired);
+        _gamePathToolTip.SetToolTip(_viewerStatus, snapshot.ViewerUpdateRequired
+            ? $"The running game has not loaded this viewer build. Expected: {expectedViewer}. Loaded: {string.Join(", ", snapshot.LoadedViewerLibraries.DefaultIfEmpty("none"))}. Fully exit the game and launch it again through DEViL."
+            : snapshot.ViewerVersionChecked ? $"Loaded viewer: {string.Join(", ", snapshot.LoadedViewerLibraries)}" : null);
         _launchButton.Enabled = !snapshot.GameRunning && !string.IsNullOrWhiteSpace(_settings.GameExecutablePath);
     }
 
@@ -364,7 +509,15 @@ internal sealed class MainForm : Form
         MessageBox.Show(this,
             "DEViL displays DOOM Eternal collision geometry through a Vulkan layer scoped to the selected game executable.\n\n" +
             "Select DOOMEternalx64vk.exe, enable Collision Viewer, choose the geometry and render style, then launch the game here. Settings are saved automatically.\n\n" +
-            "DEViL only reads process status. It does not close or modify DOOM Eternal or DESRU. The viewer is loaded on the next game start.",
+            "Volume inspector: aim at a displayed trigger or invisible wall. The selected volume turns yellow. Name, class, ID and collision state are shown by the game's native debug HUD through meathook (mh_api_get required). Encounter labels use confirmed names from the supplied reference document.\n\n" +
+            "Trigger types: expand a class to filter folders in instance names or entity definitions. The resource catalogue includes props, interact, lootdrop, ai and more; new paths are discovered live. Parent switches retain child choices. Path filtering needs compatible meathook.\n\n" +
+            "Active encounters: open the live list and enable Show in-game HUD, or use lab_encounters_show 1. Use lab_encounters_show 0 to hide it and lab_encounters_list to print the list. lab_commands_list lists state cvars and action commands.\n\n" +
+            "Entity links: all incoming/outgoing neighbors fit automatically. Wheel zooms, hold RMB to move the graph, LMB selects a node, and Fit graph restores the overall view. Enable the volume inspector and Follow crosshair to choose a volume in-game. Export JSON saves the capture. References do not prove script execution.\n\n" +
+            "Movement lab: the collider pose follows rendered frames using cached geometry; attempts still record at about 20 Hz. Compare up to six named attempts and speed/height/support at a selected time. Surface projections shows XY/XZ/YZ tangent-plane cuts and angles, with Hold and an optional in-game HUD. Aim with the inspector to measure a volume boundary.\n\n" +
+            "Level state: capture BEFORE, perform an action in the game, then capture AFTER. Select a volume change to show its captured outline, or highlight all. Save a pair as JSON or export changes as CSV. Unavailable reads are not deletions; loaded checkpoint names do not confirm a new save. Both captures must belong to the same loaded map instance. Keep DEViL open.\n\n" +
+            "Сохранения: поставьте игру на паузу, нажмите «Сохранить», затем выберите запись и нажмите «Загрузить». Сохраняется последний автосейв игры. Загрузка без перезапуска поддерживается для 6.66 Rev 3, TAG1, слота 3 при выключенном Steam Cloud. Смешивание аккаунтов запрещено. Офлайн-архивы и диагностика: Дополнительно → Инструменты. Research points сохраняет наблюдения и заметки отдельно.\n\n" +
+            "Запуск игры из DEVIL требует действующей блокировки исходящего трафика выбранного EXE в брандмауэре Windows. Включите блокировку через DESRU.\n\n" +
+            "Research: record/stop the player's path, add notes and export the journal. The viewer layer loads on the next full game start through DEViL.",
             "DEViL Help", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
@@ -385,6 +538,9 @@ internal sealed class MainForm : Form
         bool enabled = _viewerEnabled.Checked;
         _triggers.Enabled = _worldCollision.Enabled = _invisibleWalls.Enabled = enabled;
         _outlines.Enabled = _filled.Enabled = _distance.Enabled = _distanceInput.Enabled = enabled;
+        _inspector.Enabled = enabled;
+        _disabledVolumes.Enabled = _volumeHistory.Enabled = enabled;
+        _triggerTypes.Enabled = enabled;
         RefreshProcessStatus();
     }
 
