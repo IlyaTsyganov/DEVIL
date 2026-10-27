@@ -1,0 +1,25 @@
+#DEVIL_TRIGGER_PATHS_V1
+idEncounterTrigger_Commit	encounter/trigger/
+idEncounterTrigger_Exit	encounter/trigger/
+idEncounterTrigger_OverrideCombatGrouping	encounter/combat_role/
+idEncounterTrigger_PreCombat	encounter/trigger/
+idEncounterTrigger_RaiseUserFlag	encounter/trigger/
+idTrigger	trigger/
+idTrigger	trigger/interact/
+idTrigger	trigger/lootdrop/
+idTrigger	trigger/props/
+idTrigger	trigger/props/weapons/
+idTrigger_BouncePad	trigger/
+idTrigger_Facing	trigger/
+idTrigger_GorillaBar	interact/vault/
+idTrigger_GorillaBar	trigger/
+idTrigger_Hurt	trigger/
+idTrigger_Hurt	trigger/ai/
+idTrigger_Push	trigger/
+idTrigger_SonicBoom	trigger/
+idTrigger_StatDrivenEvent	trigger/stat_event/
+idTrigger_TakeDamage	func/
+idTrigger_TakeDamage	trigger/
+idTrigger_Teleporter	trigger/
+idTrigger_Teleporter_Fade	trigger/
+idTrigger_VisibilityController	trigger/

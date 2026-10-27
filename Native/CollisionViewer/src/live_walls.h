@@ -2,6 +2,7 @@
 // Shared read-only layouts: idEntity, idPhysicsProperties, idHavokPhysics_Base;
 // Havok member offsets also match the map's embedded TAG0 type descriptions.
 #include "native_profile.h"
+#include "volume_history.h"
 // DOOM stores gameplay contents beside each Havok shape in an engine-owned
 // idHavokShape table. Validate the owner chain before using those flags.
 struct ShapeContentsFilter {
@@ -66,7 +67,13 @@ struct LiveWalls {
     WallMemory memory;
     std::vector<Mesh> meshes;
     uint32_t entitiesExamined=0,active=0,unsupported=0,triggers=0;
+    uint32_t disabled=0,removed=0,unavailable=0,missingGeometry=0;
+    VolumeHistory history;
+    void resetHistory() { history.clear(); meshes.clear(); }
     std::unordered_map<uintptr_t,bool> triggerTypes;
+    std::unordered_map<uintptr_t,std::string> classNames;
+    std::unordered_set<std::string> observedTriggerClasses;
+    std::unordered_set<std::string> observedTriggerPaths;
     double milliseconds=0;
     std::string shapeError;
     bool shapeFailure(const char* message) { shapeError=message; return false; }
@@ -234,53 +241,109 @@ struct LiveWalls {
         }
         triggerTypes.emplace(vtable,result); return result;
     }
-    void refresh(uintptr_t base,const GameProfile& profile,bool includeTriggers=false) {
+    void refresh(uintptr_t base,const GameProfile& profile,bool includeTriggers=false,bool includeDisabled=false,bool includeHistory=false,ULONGLONG now=GetTickCount64(),TriggerPathLayout paths=triggerPathLayout()) {
         auto start=std::chrono::steady_clock::now();
         meshes.clear(); entitiesExamined=active=unsupported=triggers=0;
+        disabled=removed=unavailable=missingGeometry=0;
         uintptr_t service=0,map=0,list=0; uint32_t count=0;
         if(!memory.get(base+profile.gameSystemRva,service)||!memory.get(service+0x50,map)||
            !memory.get(map+profile.mapEntitiesOffset,list)||!memory.get(map+profile.mapEntitiesOffset+8,count)||count>32768) return;
         struct Entry { uint32_t id,generation; uintptr_t entity,previous,next; };
         std::vector<Entry> entries(count);
         if(count&&!memory.read(list,entries.data(),entries.size()*sizeof(Entry))) return;
-        for(const auto& entry:entries) {
+        history.begin(map);
+        for(size_t entryIndex=0;entryIndex<entries.size();++entryIndex) {
+            const auto& entry=entries[entryIndex];
+            EntityReference ref{entry.entity,map,list+entryIndex*sizeof(Entry),entry.id,entry.generation,{}};
+            history.present(ref);
             ++entitiesExamined;
             uintptr_t vtable=0;
-            if(!memory.get(entry.entity,vtable)) continue;
+            if(!memory.get(entry.entity,vtable)) { history.missing(ref,EntityStatus::Unavailable,now); continue; }
             bool trigger=includeTriggers&&triggerType(vtable,base,profile);
-            if(!trigger&&vtable!=base+profile.wallVtableRva) continue;
+            if(!trigger&&vtable!=base+profile.wallVtableRva) { history.missing(ref,EntityStatus::Unavailable,now); continue; }
+            auto foundClass=classNames.find(vtable);
+            if(foundClass==classNames.end()) foundClass=classNames.emplace(vtable,readEntityClass(memory,vtable,base,profile)).first;
+            ref.className=foundClass->second;
+            if(trigger&&validTriggerClassName(ref.className)) observedTriggerClasses.insert(ref.className);
+            std::string namePath,definitionPath;
+            if(trigger&&paths.namePointer<0x200000) {
+                uintptr_t text=0;
+                if(memory.get(entry.entity+paths.namePointer,text)) namePath=triggerNamePath(readEntityText(memory,text,512));
+            }
+            if(trigger&&paths.definition<0x200000&&paths.definitionNamePointer<0x200000) {
+                uintptr_t definition=0,text=0,check=0;
+                if(memory.get(entry.entity+paths.definition,definition)&&definition&&memory.get(definition+paths.definitionNamePointer,text)) {
+                    definitionPath=triggerNamePath(readEntityText(memory,text,512));
+                    if(!memory.get(entry.entity+paths.definition,check)||check!=definition) definitionPath.clear();
+                }
+            }
             unsigned char entity[0x240]{},physics[0x208]{}; uintptr_t physicsAddress=0;
-            if(!memory.read(entry.entity,entity,sizeof(entity))||entity[0xa4]) continue;
+            if(!memory.read(entry.entity,entity,sizeof(entity))) { history.missing(ref,EntityStatus::Unavailable,now); continue; }
+            if(entity[0xa4]) { history.missing(ref,EntityStatus::Removed,now); continue; }
+            if(trigger&&(!namePath.empty()||!definitionPath.empty())&&observedTriggerPaths.size()<2048&&validTriggerClassName(ref.className)) {
+                Entry named{};
+                if(memory.get(ref.slot,named)&&named.id==entry.id&&named.generation==entry.generation&&named.entity==entry.entity) {
+                    if(!namePath.empty()) observedTriggerPaths.insert(ref.className+'|'+namePath);
+                    if(!definitionPath.empty()&&observedTriggerPaths.size()<2048) observedTriggerPaths.insert(ref.className+'|'+definitionPath);
+                }
+            }
             memcpy(&physicsAddress,entity+0x1d0,8);
-            if(!memory.read(physicsAddress,physics,sizeof(physics))) continue;
+            if(!memory.read(physicsAddress,physics,sizeof(physics))) { history.missing(ref,EntityStatus::Unavailable,now); continue; }
             uint32_t type=0,contents=0,body=0;
             memcpy(&type,physics+0x14,4); memcpy(&contents,physics+0x44,4); memcpy(&body,physics+0x88,4);
-            bool enabledTrigger=trigger&&(contents&0x4000)&&!(contents&0x40000000)&&!physics[0x4f];
-            if((type!=2&&type!=7)||body==~0u||(!trigger&&!blocksPlayer(contents,physics[0x4f]!=0))||(trigger&&!enabledTrigger)) continue;
-            if(type==7) { unsigned char inWorld=0; if(!memory.get(physicsAddress+0x210,inWorld)||!inWorld) continue; }
-            if(trigger) ++triggers; else ++active;
+            // idDynamicEntity is not unique to invisible walls. An inactive
+            // object with only NOCOLLISION flags is identified as a wall only
+            // if this exact entity/generation was previously a playerclip.
+            bool playerClip=(contents&8)&&!(contents&3);
+            if(!trigger&&!playerClip&&!history.knownWall(ref)) continue;
+            bool inWorld=true;
+            if(type==7) {
+                unsigned char present=0;
+                if(!memory.get(physicsAddress+0x210,present)) { history.missing(ref,EntityStatus::Unavailable,now); continue; }
+                inWorld=present!=0;
+            }
+            EntityStatus status=volumeCollisionStatus(type,contents,physics[0x4f]!=0,body,inWorld,trigger);
+            if(status==EntityStatus::Unavailable) { history.missing(ref,status,now); continue; }
+            if(status==EntityStatus::Enabled) { if(trigger) ++triggers; else ++active; }
+            auto lostGeometry=[&] {
+                ++missingGeometry;
+                if(status==EntityStatus::Enabled) ++unsupported;
+                history.missing(ref,status==EntityStatus::Disabled?EntityStatus::Disabled:EntityStatus::Unavailable,now);
+            };
             uintptr_t wrapper=0,root=0; memcpy(&wrapper,physics+0x1c0,8);
-            if(!memory.get(wrapper,root)) { ++unsupported; continue; }
+            if(!memory.get(wrapper,root)||!root) { lostGeometry(); continue; }
             auto geometry=std::make_shared<Geometry>(); geometry->kind=trigger?0u:2u;
-            if(!shape(root,WallTransform{},*geometry)||geometry->triangles.empty()) { ++unsupported; continue; }
+            if(!shape(root,WallTransform{},*geometry)||geometry->triangles.empty()) { lostGeometry(); continue; }
             // Reject a torn snapshot if an entity was removed or its slot reused.
-            uintptr_t stillPhysics=0; uint32_t stillContents=0; unsigned char removed=1;
+            uintptr_t stillPhysics=0; uint32_t stillContents=0; unsigned char removedFlag=1;
             if(!memory.get(entry.entity+0x1d0,stillPhysics)||stillPhysics!=physicsAddress||
                !memory.get(physicsAddress+0x44,stillContents)||stillContents!=contents||
-               !memory.get(entry.entity+0xa4,removed)||removed) continue;
+               !memory.get(entry.entity+0xa4,removedFlag)||removedFlag) { history.missing(ref,EntityStatus::Unavailable,now); continue; }
+            Entry current{};
+            if(!memory.get(ref.slot,current)) { history.missing(ref,EntityStatus::Unavailable,now); continue; }
+            if(current.id!=entry.id||current.generation!=entry.generation||current.entity!=entry.entity) { history.missing(ref,EntityStatus::Removed,now); continue; }
             Mesh mesh{}; mesh.kind=geometry->kind; mesh.geometry=geometry;
+            mesh.entity=ref;
+            mesh.triggerNameKnown=!namePath.empty(); mesh.triggerPath=std::move(namePath);
+            mesh.triggerDefinitionPath=std::move(definitionPath);
             float axis[9],origin[3]; memcpy(axis,physics+0x8c,36); memcpy(origin,physics+0xb0,12);
             bool finite=true;
             for(int r=0;r<3;++r) for(int c=0;c<4;++c) {
                 float v=c<3?axis[c*3+r]:origin[r]; finite=finite&&std::isfinite(v); mesh.matrix[r*4+c]=v;
             }
-            if(!finite) continue;
+            if(!finite) { lostGeometry(); continue; }
             for(int k=0;k<3;++k) { mesh.bounds[k]=FLT_MAX; mesh.bounds[k+3]=-FLT_MAX; }
             for(Vec3 point:geometry->triangles) {
                 Vec3 world=mesh.world(point); float xyz[3]{world.x,world.y,world.z};
                 for(int k=0;k<3;++k) { mesh.bounds[k]=std::min(mesh.bounds[k],xyz[k]); mesh.bounds[k+3]=std::max(mesh.bounds[k+3],xyz[k]); }
             }
-            meshes.push_back(std::move(mesh));
+            history.sample(std::move(mesh),status,now);
+        }
+        history.collect(meshes,includeTriggers,includeDisabled,includeHistory,now);
+        for(const auto& mesh:meshes) {
+            if(mesh.volumeState==EntityStatus::Disabled) ++disabled;
+            else if(mesh.volumeState==EntityStatus::Removed) ++removed;
+            else if(mesh.volumeState==EntityStatus::Unavailable) ++unavailable;
         }
         milliseconds=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
     }

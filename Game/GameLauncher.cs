@@ -3,15 +3,20 @@ using Devil.Configuration;
 
 namespace Devil.Game;
 
-public sealed class GameLauncher(SettingsStore settingsStore)
+public sealed class GameLauncher
 {
-    private readonly VulkanLayerRegistration _layerRegistration = new(settingsStore);
+    private readonly VulkanLayerRegistration _layerRegistration;
+    private readonly Func<string, GameFirewallResult> _firewall;
+    public GameLauncher(SettingsStore settingsStore) : this(settingsStore, GameFirewall.Inspect) { }
+    internal GameLauncher(SettingsStore settingsStore, Func<string, GameFirewallResult> firewall)
+    { _layerRegistration = new(settingsStore); _firewall = firewall; }
 
     public string RuntimeDirectory => _layerRegistration.RuntimeDirectory;
 
     public Process Start(DevilSettings settings)
     {
         var startInfo = CreateStartInfo(settings.GameExecutablePath);
+        GameFirewall.RequireBlocked(_firewall(startInfo.FileName));
         if (settings.CollisionViewerEnabled || startInfo.Environment[LightingFixPolicy.EnvironmentVariable] == "1")
             _layerRegistration.EnableForGame(startInfo.FileName);
 
@@ -33,6 +38,8 @@ public sealed class GameLauncher(SettingsStore settingsStore)
             WorkingDirectory = Path.GetDirectoryName(gamePath)!,
             UseShellExecute = false
         };
+        startInfo.ArgumentList.Add("+com_skipIntroVideo");
+        startInfo.ArgumentList.Add("1");
 
         // Child process only: manual/Steam launches keep their existing behavior.
         // Explicitly clear an inherited opt-in for all other game versions.

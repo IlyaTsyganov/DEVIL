@@ -37,14 +37,44 @@ int main() {
     CreateDirectoryW(temporaryRoot.c_str(),nullptr); CreateDirectoryW(settingsDirectory.c_str(),nullptr);
     std::wstring settingsFile=settingsDirectory+L"\\viewer.ini";
     expect(SetEnvironmentVariableW(L"LOCALAPPDATA",temporaryRoot.c_str()),"isolated settings path");
-    writeSettings(settingsFile,L"Enabled=0\r\nShowTriggers=0\r\nShowCollision=1\r\nShowWalls=0\r\nCollisionMode=0\r\nDistance=100\r\n");
+    writeSettings(settingsFile,L"Enabled=0\r\nShowTriggers=0\r\nShowCollision=1\r\nShowWalls=0\r\nInspectVolumes=0\r\nCollisionMode=0\r\nDistance=100\r\n");
     updateViewerSettings();
-    expect(!enabled&&!showTriggers&&showCollision&&!showWalls&&collisionMode==0&&radius==100,"settings file controls viewer without hotkeys");
+    expect(!enabled&&!showTriggers&&showCollision&&!showWalls&&!inspectVolumes&&collisionMode==0&&radius==100,"settings file controls viewer without hotkeys");
     Sleep(260);
-    writeSettings(settingsFile,L"Enabled=1\r\nShowTriggers=1\r\nShowCollision=0\r\nShowWalls=1\r\nCollisionMode=1\r\nDistance=175\r\n");
+    writeSettings(settingsFile,L"Enabled=1\r\nShowTriggers=1\r\nShowCollision=0\r\nShowWalls=1\r\nInspectVolumes=1\r\nShowDisabledVolumes=1\r\nShowVolumeHistory=1\r\nCollisionMode=1\r\nDistance=175\r\n[TriggerClasses]\r\nidTrigger=0\r\nidEncounterTrigger_Commit=0\r\nidTrigger_Teleporter=1\r\nnot_a_class=0\r\n");
     WritePrivateProfileStringW(nullptr,nullptr,nullptr,settingsFile.c_str());
     updateViewerSettings();
-    expect(enabled&&showTriggers&&!showCollision&&showWalls&&collisionMode==1&&radius==175,"live settings update");
+    expect(enabled&&showTriggers&&!showCollision&&showWalls&&inspectVolumes&&collisionMode==1&&radius==175,"live settings update including inspector toggle");
+    expect(showDisabledVolumes&&showVolumeHistory,"inactive-volume and history settings update live");
+    expect(hiddenTriggerClasses.size()==2&&hiddenTriggerClasses.count("idTrigger")&&hiddenTriggerClasses.count("idEncounterTrigger_Commit"),"only exact valid disabled class entries are loaded");
+    WritePrivateProfileStringW(L"TriggerPaths",L"idTrigger|trigger/props/",L"0",settingsFile.c_str());
+    WritePrivateProfileStringW(L"TriggerPaths",L"idTrigger|trigger/props_extra/",L"1",settingsFile.c_str());
+    WritePrivateProfileStringW(L"TriggerPaths",L"idTrigger|trigger/../",L"0",settingsFile.c_str());
+    WritePrivateProfileStringW(L"TriggerPaths",L"invalid|trigger/props/",L"0",settingsFile.c_str());
+    WritePrivateProfileStringW(L"TriggerPaths",L"idTrigger|@no_path",L"0",settingsFile.c_str());
+    Sleep(260); updateViewerSettings();
+    expect(hiddenTriggerPaths.size()==1&&hiddenTriggerPaths.count("idTrigger|trigger/props/"),"live path settings accept only valid class-scoped disabled folder rules");
+    Sleep(260);
+    writeSettings(settingsFile,L"Enabled=1\r\nShowTriggers=1\r\nShowCollision=0\r\nShowWalls=1\r\nCollisionMode=1\r\nDistance=175\r\n");
+    WritePrivateProfileStringW(nullptr,nullptr,nullptr,settingsFile.c_str()); updateViewerSettings();
+    expect(hiddenTriggerClasses.empty(),"removing the class section re-enables all classes live");
+    expect(hiddenTriggerPaths.empty(),"removing path rules restores path visibility live");
+    expect(triggerNamePath("trigger/props/pickup_4")=="trigger/props/"&&triggerNamePath("TRIGGER\\INTERACT\\panel_2")=="trigger/interact/"&&
+           triggerNamePath("arena_trigger").empty()&&triggerNamePath("").empty()&&triggerNamePath("trigger/../item").empty(),"folder extraction normalizes paths without inventing a directory for flat names");
+    auto pathFields=[](const std::string& type,const char* field)->InspectorField {
+        if(type=="idEntity"&&strcmp(field,"name")==0) return {0x40,48,"idStr"};
+        if(type=="idStr") return {8,8,"char*"};
+        if(type=="idEntity") return {0xa8,8,"idDeclEntityDef*"};
+        if(type=="idResource") return {8,8,"idAtomicString"};
+        if(type=="idAtomicString") return {0,8,"char*"};
+        return {};
+    };
+    auto layout=resolveTriggerPathLayout(pathFields);
+    expect(layout.namePointer==0x48&&layout.definition==0xa8&&layout.definitionNamePointer==8,"both runtime and definition paths resolve from reflection");
+    auto badLayout=resolveTriggerPathLayout([&](const std::string& type,const char* field) { return type=="idResource"?InspectorField{8,4,"int"}:pathFields(type,field); });
+    expect(badLayout.namePointer==0x48&&badLayout.definition==~0u,"invalid definition layout preserves valid runtime-name support");
+    inspectVolumes=false;
+    showDisabledVolumes=showVolumeHistory=false;
     enabled=true; showTriggers=true; showCollision=true; showWalls=true; collisionMode=1; radius=40;
     Mesh priorityMeshes[3]{}; priorityMeshes[0].kind=0; priorityMeshes[1].kind=1; priorityMeshes[2].kind=2;
     std::vector<Candidate> priorityCandidates{{&priorityMeshes[0],1},{&priorityMeshes[1],9},{&priorityMeshes[1],2},{&priorityMeshes[2],0}};
@@ -116,6 +146,86 @@ int main() {
     expect(vertices[13].color[0]==1&&vertices[13].color[1]==.45f,"orange walls");
     for(bool* toggle:{&showTriggers,&showCollision,&showWalls}) {
         *toggle=false; expect(collectVertices(camera,vertices)==6&&vertices.size()==10,"independent group toggle"); *toggle=true;
+    }
+    {
+        auto filterSavedMeshes=std::move(meshes),filterSavedLive=std::move(liveWalls.meshes);
+        auto filterSavedNodes=std::move(spatialNodes); auto filterSavedOrder=std::move(spatialOrder);
+        Mesh generic=filterSavedMeshes[0],commit=generic,teleporter=generic;
+        generic.entity.address=1; generic.entity.className="idTrigger";
+        commit.entity.address=2; commit.entity.className="idEncounterTrigger_Commit";
+        teleporter.entity.address=3; teleporter.entity.className="idTrigger_Teleporter";
+        liveWalls.meshes={generic,commit,teleporter,filterSavedLive[0]};
+        meshes={filterSavedMeshes[1]}; spatialOrder={0}; buildSpatialNode(0,1);
+        hiddenTriggerClasses={"idTrigger","idEncounterTrigger_Commit"};
+        std::vector<Candidate> filterVisible; gatherVisible(camera,filterVisible);
+        expect(filterVisible.size()==3,"class filter leaves world collision, walls and other trigger classes visible");
+        auto picked=pickInspectorVolume(camera,filterVisible,radius);
+        expect(picked.mesh&&picked.mesh->entity.className=="idTrigger_Teleporter","inspector cannot select a hidden trigger class");
+        expect(collectVertices(camera,vertices)==9&&vertices.size()==15,"hidden class produces neither filled triangles nor outlines");
+        showDisabledVolumes=showVolumeHistory=true;
+        for(auto status:{EntityStatus::Disabled,EntityStatus::Removed,EntityStatus::Unavailable}) {
+            liveWalls.meshes[0].volumeState=liveWalls.meshes[1].volumeState=status;
+            gatherVisible(camera,filterVisible); expect(filterVisible.size()==3,"class filter also hides disabled and historical snapshots");
+        }
+        hiddenTriggerClasses={"idTrigger_UnseenClass"};
+        liveWalls.meshes[0].volumeState=liveWalls.meshes[1].volumeState=EntityStatus::Enabled;
+        gatherVisible(camera,filterVisible); expect(filterVisible.size()==5,"unlisted and newly discovered classes remain visible by default");
+        showTriggers=false; gatherVisible(camera,filterVisible); expect(filterVisible.size()==2,"main Triggers switch takes priority over class preferences"); showTriggers=true;
+        hiddenTriggerClasses.clear();
+        liveWalls.meshes[0].triggerNameKnown=liveWalls.meshes[1].triggerNameKnown=liveWalls.meshes[2].triggerNameKnown=true;
+        liveWalls.meshes[0].triggerPath="trigger/props/";
+        liveWalls.meshes[1].entity.className="idTrigger"; liveWalls.meshes[1].triggerPath="trigger/interact/";
+        liveWalls.meshes[2].triggerPath="trigger/props/";
+        hiddenTriggerPaths={"idTrigger|trigger/props/"};
+        gatherVisible(camera,filterVisible); expect(filterVisible.size()==4,"path filter hides props while retaining interact, other classes, walls and world collision");
+        picked=pickInspectorVolume(camera,filterVisible,radius);
+        expect(picked.mesh&&picked.mesh->triggerPath=="trigger/interact/","inspector cannot select a hidden name path");
+        expect(collectVertices(camera,vertices)==12&&vertices.size()==20,"path filter removes both filled triangles and outlines");
+        for(auto status:{EntityStatus::Disabled,EntityStatus::Removed,EntityStatus::Unavailable}) {
+            liveWalls.meshes[0].volumeState=status; gatherVisible(camera,filterVisible);
+            expect(filterVisible.size()==4,"path filter remains effective on disabled and historical snapshots");
+        }
+        liveWalls.meshes[0].volumeState=EntityStatus::Enabled;
+        liveWalls.meshes[0].triggerPath="trigger/props_extra/"; expect(triggerClassShown(liveWalls.meshes[0]),"path matching respects folder boundaries");
+        liveWalls.meshes[0].triggerPath="trigger/props/small/"; expect(!triggerClassShown(liveWalls.meshes[0]),"hidden folder covers nested paths");
+        liveWalls.meshes[0].triggerNameKnown=false; expect(triggerClassShown(liveWalls.meshes[0]),"unavailable names stay visible by default");
+        liveWalls.meshes[0].triggerDefinitionPath="trigger/props/weapons/";
+        expect(!triggerClassShown(liveWalls.meshes[0]),"resource definition folders filter map-renamed triggers");
+        liveWalls.meshes[0].triggerNameKnown=true; liveWalls.meshes[0].triggerPath="trigger/interact/";
+        expect(!triggerClassShown(liveWalls.meshes[0]),"a hidden definition folder applies even with a different instance-name folder");
+        liveWalls.meshes[0].triggerDefinitionPath="trigger/props_extra/";
+        expect(triggerClassShown(liveWalls.meshes[0]),"definition folder matching respects boundaries");
+        liveWalls.meshes[0].triggerDefinitionPath.clear(); liveWalls.meshes[0].triggerNameKnown=false;
+        hiddenTriggerClasses={"idTrigger"}; expect(!triggerClassShown(liveWalls.meshes[0]),"class mask still overrides unavailable names");
+        hiddenTriggerClasses.clear(); hiddenTriggerPaths.clear(); showDisabledVolumes=showVolumeHistory=false;
+        meshes=std::move(filterSavedMeshes); liveWalls.meshes=std::move(filterSavedLive);
+        spatialNodes=std::move(filterSavedNodes); spatialOrder=std::move(filterSavedOrder);
+        auto discoveryFile=std::filesystem::path(settingsDirectory)/L"trigger-classes.txt";
+        TriggerClassDiscovery discovery(discoveryFile);
+        discovery.publish({"idTrigger_Teleporter","idTrigger_NewClass","not_a_class"},1000);
+        std::ifstream report(discoveryFile); std::string data((std::istreambuf_iterator<char>(report)),{}); report.close();
+        expect(data=="idTrigger_NewClass\nidTrigger_Teleporter\n","discovery publishes only validated sorted class names");
+        discovery.publish({"idEncounterTrigger_Commit"},2000);
+        report.open(discoveryFile); data.assign(std::istreambuf_iterator<char>(report),{}); report.close();
+        expect(data.find("idTrigger_NewClass")!=std::string::npos&&data.find("idEncounterTrigger_Commit")!=std::string::npos,"class discovery accumulates across level scans");
+    }
+    {
+        auto savedWorld=std::move(meshes); auto savedLive=std::move(liveWalls.meshes);
+        auto historySavedNodes=std::move(spatialNodes); auto historySavedOrder=std::move(spatialOrder);
+        Mesh inactive=savedLive[0]; inactive.volumeState=EntityStatus::Disabled;
+        liveWalls.meshes={inactive}; showDisabledVolumes=true;
+        expect(collectVertices(camera,vertices)==0&&vertices.size()==2,"disabled geometry is outline-only even in filled mode");
+        expect(vertices[0].color[3]==.4f,"disabled geometry uses a pale contour");
+        showDisabledVolumes=false;
+        expect(collectVertices(camera,vertices)==0&&vertices.empty(),"disabled toggle hides inactive geometry");
+        liveWalls.meshes[0].volumeState=EntityStatus::Removed; liveWalls.meshes[0].historical=true; showVolumeHistory=true;
+        expect(collectVertices(camera,vertices)==0&&vertices.size()==6,"removed snapshots are dashed and never filled");
+        expect(volumeStyle(liveWalls.meshes[0],true,1000).filled==false,"selection never fills a removed snapshot");
+        Mesh changed=inactive; changed.volumeState=EntityStatus::Enabled; changed.changedAt=1000;
+        expect(volumeStyle(changed,false,1100).line[1]==1.f,"activation change gets a short green highlight");
+        expect(volumeStyle(changed,false,3100).line[1]==.45f,"activation highlight expires");
+        showVolumeHistory=false; meshes=std::move(savedWorld); liveWalls.meshes=std::move(savedLive);
+        spatialNodes=std::move(historySavedNodes); spatialOrder=std::move(historySavedOrder);
     }
     // Exercise the same readers and filters with all audited retail layouts.
     for(const GameProfile* selected:kGameProfiles) {
@@ -211,6 +321,16 @@ int main() {
     LiveWalls walls; walls.refresh(b,profile);
     expect(walls.meshes.size()==1&&walls.meshes[0].geometry->triangles.size()==36&&walls.meshes[0].geometry->lines.size()==24,"exact live convex topology");
     expect(walls.meshes[0].bounds[0]==9&&walls.meshes[0].bounds[5]==33,"live world transform");
+    const EntityReference wallRef=walls.meshes[0].entity;
+    expect(wallRef.address==reinterpret_cast<uintptr_t>(entity.data())&&wallRef.id==1&&wallRef.generation==0&&
+           wallRef.map==reinterpret_cast<uintptr_t>(map.data()),"render mesh retains its map-scoped entity identity");
+    expect(readEntityStatus(memory,wallRef,b,profile)==EntityStatus::Enabled,"inspector validates live entity slot");
+    put(row,4,uint32_t(7));
+    expect(readEntityStatus(memory,wallRef,b,profile)==EntityStatus::Removed,"inspector rejects reused generations at the same address");
+    put(row,4,uint32_t(0));
+    put(physics.data(),0x44,uint32_t(0x40000000));
+    expect(readEntityStatus(memory,wallRef,b,profile)==EntityStatus::Disabled,"inspector distinguishes disabled collision");
+    put(physics.data(),0x44,uint32_t(8));
     put(physics.data(),0x44,uint32_t(0x40000000)); walls.refresh(b,profile); expect(walls.meshes.empty(),"disabled collision disappears");
     put(physics.data(),0x44,uint32_t(8)); entity[0xa4]=1; walls.refresh(b,profile); expect(walls.meshes.empty(),"deleted entity disappears"); entity[0xa4]=0;
     put(map.data(),fixtureEntitiesOffset+8,uint32_t(0)); walls.refresh(b,profile); expect(walls.meshes.empty(),"despawned slot disappears");
@@ -227,8 +347,65 @@ int main() {
     put(entity.data(),0,triggerVtable); put(physics.data(),0x44,uint32_t(0x4000));
     LiveWalls triggers; triggers.refresh(b,profile,true);
     expect(triggers.triggers==1&&triggers.meshes.size()==1&&triggers.meshes[0].kind==0,"active trigger decoded in both profiles");
+    expect(triggers.observedTriggerClasses.count("idTrigger_Test")==1,"scanner discovers concrete trigger classes on every profile");
+    const char* instanceName="trigger/props/pickup_123";
+    put(entity.data(),0x48,reinterpret_cast<uintptr_t>(instanceName));
+    std::array<uintptr_t,2> definition{0,reinterpret_cast<uintptr_t>("trigger/ai/test")};
+    put(entity.data(),0xa8,reinterpret_cast<uintptr_t>(definition.data()));
+    const TriggerPathLayout pathLayout{0x48,0xa8,8};
+    triggers.refresh(b,profile,true,true,true,1000,pathLayout);
+    expect(triggers.meshes[0].triggerNameKnown&&triggers.meshes[0].triggerPath=="trigger/props/"&&
+           triggers.observedTriggerPaths.count("idTrigger_Test|trigger/props/")==1,"scanner copies and discovers name folders on every profile");
+    expect(triggers.meshes[0].triggerDefinitionPath=="trigger/ai/"&&triggers.observedTriggerPaths.count("idTrigger_Test|trigger/ai/")==1,"scanner copies and discovers definition paths on every profile");
+    put(entity.data(),0x48,reinterpret_cast<uintptr_t>("flat_trigger_123"));
+    triggers.refresh(b,profile,true,true,true,1050,pathLayout);
+    expect(!triggers.meshes[0].triggerNameKnown&&triggers.meshes[0].triggerPath.empty()&&triggers.meshes[0].triggerDefinitionPath=="trigger/ai/","flat instance name has no artificial folder and keeps its resource subtype");
+    put(entity.data(),0x48,reinterpret_cast<uintptr_t>(instanceName));
+    triggers.refresh(b,profile,true,true,true,1075,pathLayout);
+    put(physics.data(),0x1c0,uintptr_t(0)); triggers.refresh(b,profile,true,true,true,1100,pathLayout);
+    expect(triggers.meshes[0].historical&&triggers.meshes[0].triggerPath=="trigger/props/","historical geometry retains its copied name folder");
+    expect(triggers.meshes[0].triggerDefinitionPath=="trigger/ai/","historical geometry retains its copied resource folder");
+    put(physics.data(),0x1c0,reinterpret_cast<uintptr_t>(&root));
+    expect(triggers.meshes[0].entity.className=="idTrigger_Test","inspector retains the actual trigger class");
     put(physics.data(),0x44,uint32_t(0x40004000)); triggers.refresh(b,profile,true);
     expect(triggers.meshes.empty(),"disabled trigger filtered in both profiles");
+    {
+        LiveWalls audit;
+        put(physics.data(),0x14,uint32_t(2)); put(physics.data(),0x44,uint32_t(0x4000));
+        audit.refresh(b,profile,true,true,true,1000);
+        expect(audit.meshes.size()==1&&audit.meshes[0].changedAt==0,"initial discovery is not an activation event");
+        put(physics.data(),0x44,uint32_t(0x40000000)); audit.refresh(b,profile,true,true,true,1100);
+        expect(audit.disabled==1&&audit.meshes[0].volumeState==EntityStatus::Disabled&&!audit.meshes[0].historical,"inactive trigger keeps its validated current shape");
+        expect(audit.meshes[0].changedAt==1100,"activation state change is timestamped");
+        put(physics.data(),0x1c0,uintptr_t(0)); audit.refresh(b,profile,true,true,true,1200);
+        expect(audit.meshes.size()==1&&audit.meshes[0].historical&&audit.meshes[0].geometryAt==1100&&audit.meshes[0].volumeState==EntityStatus::Disabled,"disabled trigger with released shape uses an explicitly historical snapshot");
+        put(physics.data(),0x1c0,reinterpret_cast<uintptr_t>(&root)); put(physics.data(),0x44,uint32_t(0x4000));
+        audit.refresh(b,profile,true,true,true,1300);
+        expect(audit.meshes[0].volumeState==EntityStatus::Enabled&&!audit.meshes[0].historical&&audit.meshes[0].changedAt==1300,"reactivation replaces snapshot with live geometry");
+        put(entity.data(),0x1d0,uintptr_t(0)); audit.refresh(b,profile,true,true,true,1400);
+        expect(audit.meshes[0].volumeState==EntityStatus::Unavailable&&audit.meshes[0].historical,"read failure is not reported as a disabled or removed object");
+        put(entity.data(),0x1d0,reinterpret_cast<uintptr_t>(physics.data())); entity[0xa4]=1;
+        audit.refresh(b,profile,true,true,true,1500);
+        expect(audit.meshes[0].volumeState==EntityStatus::Removed,"deleted flag positively identifies a removed entity");
+        entity[0xa4]=0; put(row,4,uint32_t(8)); audit.refresh(b,profile,true,true,true,1600);
+        expect(audit.meshes.size()==2,"reused pointer keeps the old snapshot separate from the new generation");
+        audit.refresh(b,profile,true,true,true,17000);
+        expect(audit.meshes.size()==1&&audit.meshes[0].entity.generation==8,"old snapshots expire without removing live new generations");
+        put(map.data(),fixtureEntitiesOffset+8,uint32_t(0)); audit.refresh(b,profile,true,true,true,17100);
+        expect(audit.removed==1,"absence from a successfully read entity table identifies removal");
+        audit.resetHistory(); put(map.data(),fixtureEntitiesOffset+8,uint32_t(1)); put(physics.data(),0x1c0,uintptr_t(0));
+        audit.refresh(b,profile,true,true,true,17200);
+        expect(audit.meshes.empty(),"level reset never replays an old shape when the current shape is unavailable");
+        put(row,4,uint32_t(0)); put(physics.data(),0x1c0,reinterpret_cast<uintptr_t>(&root));
+        put(entity.data(),0,b+profile.wallVtableRva); put(physics.data(),0x44,uint32_t(0x40000000));
+        LiveWalls coldWall; coldWall.refresh(b,profile,true,true,true,18000);
+        expect(coldWall.meshes.empty(),"unidentified NOCOLLISION props are not guessed to be invisible walls");
+        put(physics.data(),0x44,uint32_t(0x40000008)); coldWall.refresh(b,profile,true,true,true,18100);
+        expect(coldWall.disabled==1,"explicit playerclip contents identifies an initially disabled wall");
+        put(physics.data(),0x44,uint32_t(0x40000000)); coldWall.refresh(b,profile,true,true,true,18200);
+        expect(coldWall.disabled==1,"previously identified wall remains identifiable after contents are cleared");
+        put(physics.data(),0x44,uint32_t(8));
+    }
     put(entity.data(),0,b+profile.wallVtableRva); put(physics.data(),0x44,uint32_t(8));
     // Discover the map through the same live chain as production; no filename list.
     std::vector<unsigned char> havok(0x210c0);
@@ -281,5 +458,5 @@ int main() {
     printf("PASS: %s physical collision, level transitions, menus and console.\n",profile.name);
     }
     std::filesystem::remove_all(temporaryRoot);
-    puts("PASS: UI settings and live update, modes/groups/opacity, UI/console clipping, live wall activation/movement, map discovery, world decoding/BVH, async cancellation, rapid switching, no stale map fallback.");
+    puts("PASS: live settings, modes/groups/opacity, disabled outlines, timed transitions/snapshots, deletion vs read failure, slot reuse, level history reset, UI/console clipping, world decoding/BVH, async cancellation and rapid switching.");
 }
