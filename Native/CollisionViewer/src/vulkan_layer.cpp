@@ -32,6 +32,7 @@ extern "C" {
 #include "shaders_spirv.h"
 #include "depth_state.h"
 #include "lighting_fix.h"
+#include "entity_metadata.h"
 
 #define EXPORT extern "C" __declspec(dllexport)
 static constexpr char kLayerName[]="VK_LAYER_DOOM_collision";
@@ -56,7 +57,14 @@ struct Vertex { Vec3 position; float color[4]; };
 struct Geometry { uint32_t kind; std::vector<Vec3> lines,triangles; };
 struct Mesh {
     uint32_t kind; float bounds[6]; std::shared_ptr<const Geometry> geometry;
+    EntityReference entity;
+    EntityStatus volumeState=EntityStatus::Enabled;
+    bool historical=false;
+    ULONGLONG geometryAt=0,changedAt=0;
     float matrix[12]{1,0,0,0,0,1,0,0,0,0,1,0};
+    std::string triggerPath;
+    std::string triggerDefinitionPath;
+    bool triggerNameKnown=false;
     Vec3 world(Vec3 p) const {
         return {matrix[0]*p.x+matrix[1]*p.y+matrix[2]*p.z+matrix[3],
                 matrix[4]*p.x+matrix[5]*p.y+matrix[6]*p.z+matrix[7],
@@ -89,11 +97,22 @@ static uint32_t buildSpatialNodeFor(const std::vector<Mesh>& source,std::vector<
 }
 static uint32_t buildSpatialNode(uint32_t begin,uint32_t end) { return buildSpatialNodeFor(meshes,spatialNodes,spatialOrder,begin,end); }
 static bool sceneLoaded=false, showTriggers=true, showCollision=true, showWalls=true, enabled=true;
+static bool inspectVolumes=false;
+static bool showDisabledVolumes=false,showVolumeHistory=false;
+static std::atomic<bool> showActiveEncountersHud{false};
+static bool showResearchPath=false,recordResearch=false;
+static DWORD researchProcess=0;
+static ULONGLONG researchReset=0,researchMarker=0;
+static std::string researchMarkerLabel;
+static bool showPlayerCollider=false,showMotionPaths=true,motionFollowTarget=true;
+static std::atomic<bool> showSupportHud{false};
+static DWORD motionProcess=0;
 static uint32_t collisionMode=1;
 static char sceneMap[64]{};
 static constexpr uint32_t kInitialVertexCapacity=250000;
 static float radius=40.0f;
 static float cullingRadius() { return radius+std::max(0.5f,radius*0.01f); }
+#include "trigger_classes.h"
 
 static void loadScene() {
     if(sceneLoaded) return;
@@ -426,18 +445,44 @@ static void updateViewerSettings() {
     lastRead=now;
 
     const bool oldEnabled=enabled, oldTriggers=showTriggers, oldCollision=showCollision, oldWalls=showWalls;
+    const bool oldDisabled=showDisabledVolumes,oldHistory=showVolumeHistory;
     const uint32_t oldMode=collisionMode;
     const float oldRadius=radius;
+    auto nextHiddenClasses=readHiddenTriggerClasses(settingsPath);
+    auto nextHiddenPaths=readHiddenTriggerPaths(settingsPath);
+    const bool classFilterChanged=nextHiddenClasses!=hiddenTriggerClasses||nextHiddenPaths!=hiddenTriggerPaths;
+    hiddenTriggerClasses.swap(nextHiddenClasses);
+    hiddenTriggerPaths.swap(nextHiddenPaths);
     enabled=GetPrivateProfileIntW(L"Viewer",L"Enabled",enabled?1:0,settingsPath.c_str())!=0;
     showTriggers=GetPrivateProfileIntW(L"Viewer",L"ShowTriggers",showTriggers?1:0,settingsPath.c_str())!=0;
     showCollision=GetPrivateProfileIntW(L"Viewer",L"ShowCollision",showCollision?1:0,settingsPath.c_str())!=0;
     showWalls=GetPrivateProfileIntW(L"Viewer",L"ShowWalls",showWalls?1:0,settingsPath.c_str())!=0;
+    inspectVolumes=GetPrivateProfileIntW(L"Viewer",L"InspectVolumes",0,settingsPath.c_str())!=0;
+    showDisabledVolumes=GetPrivateProfileIntW(L"Viewer",L"ShowDisabledVolumes",0,settingsPath.c_str())!=0;
+    showVolumeHistory=GetPrivateProfileIntW(L"Viewer",L"ShowVolumeHistory",0,settingsPath.c_str())!=0;
+    showActiveEncountersHud=GetPrivateProfileIntW(L"Viewer",L"ShowActiveEncountersHud",0,settingsPath.c_str())!=0;
+    showResearchPath=GetPrivateProfileIntW(L"Viewer",L"ShowResearchPath",0,settingsPath.c_str())!=0;
+    recordResearch=GetPrivateProfileIntW(L"Viewer",L"RecordResearch",0,settingsPath.c_str())!=0;
+    researchProcess=GetPrivateProfileIntW(L"Viewer",L"ResearchProcess",0,settingsPath.c_str());
+    motionProcess=GetPrivateProfileIntW(L"Viewer",L"MotionProcess",0,settingsPath.c_str());
+    showPlayerCollider=GetPrivateProfileIntW(L"Viewer",L"ShowPlayerCollider",0,settingsPath.c_str())!=0;
+    showMotionPaths=GetPrivateProfileIntW(L"Viewer",L"ShowMotionPaths",1,settingsPath.c_str())!=0;
+    motionFollowTarget=GetPrivateProfileIntW(L"Viewer",L"MotionFollowTarget",1,settingsPath.c_str())!=0;
+    showSupportHud=GetPrivateProfileIntW(L"Viewer",L"ShowSupportHud",0,settingsPath.c_str())!=0;
+    wchar_t researchValue[512]{};
+    GetPrivateProfileStringW(L"Viewer",L"ResearchReset",L"0",researchValue,512,settingsPath.c_str()); researchReset=_wcstoui64(researchValue,nullptr,10);
+    GetPrivateProfileStringW(L"Viewer",L"ResearchMarker",L"0",researchValue,512,settingsPath.c_str()); researchMarker=_wcstoui64(researchValue,nullptr,10);
+    GetPrivateProfileStringW(L"Viewer",L"ResearchMarkerLabel",L"",researchValue,512,settingsPath.c_str());
+    char markerUtf8[2048]{}; WideCharToMultiByte(CP_UTF8,0,researchValue,-1,markerUtf8,2048,nullptr,nullptr); researchMarkerLabel=markerUtf8;
     collisionMode=GetPrivateProfileIntW(L"Viewer",L"CollisionMode",static_cast<int>(collisionMode),settingsPath.c_str())!=0?1u:0u;
     radius=static_cast<float>(std::clamp(GetPrivateProfileIntW(L"Viewer",L"Distance",static_cast<UINT>(radius),settingsPath.c_str()),UINT{20},UINT{200}));
-    if(oldEnabled!=enabled||oldTriggers!=showTriggers||oldCollision!=showCollision||oldWalls!=showWalls||oldMode!=collisionMode||oldRadius!=radius) {
+    if(oldEnabled!=enabled||oldTriggers!=showTriggers||oldCollision!=showCollision||oldWalls!=showWalls||oldMode!=collisionMode||oldRadius!=radius||oldDisabled!=showDisabledVolumes||oldHistory!=showVolumeHistory||classFilterChanged) {
         char message[200];
-        sprintf_s(message,"DEViL settings: triggers=%d collision=%d walls=%d fill=%u radius=%.0f enabled=%d",showTriggers,showCollision,showWalls,collisionMode,radius,enabled);
+        sprintf_s(message,"DEViL settings: triggers=%d collision=%d walls=%d disabled=%d history=%d fill=%u radius=%.0f enabled=%d",showTriggers,showCollision,showWalls,showDisabledVolumes,showVolumeHistory,collisionMode,radius,enabled);
         note(message);
+        if(classFilterChanged) {
+            char count[150]; sprintf_s(count,"Trigger visibility updated: %zu hidden classes, %zu hidden name paths.",hiddenTriggerClasses.size(),hiddenTriggerPaths.size()); note(count);
+        }
     }
 }
 
@@ -499,8 +544,20 @@ static void sortVisibleCandidates(std::vector<Candidate>& visible) {
 }
 #include "live_walls.h"
 #include "game_ui.h"
+#include "research_session.h"
+#include "player_motion.h"
+#include "checkpoint_state.h"
 #include "runtime_scene.h"
 #include "console_clip.h"
+#include "encounter_labels.h"
+#include "meathook_hud.h"
+#include "lab_console.h"
+#include "active_encounters.h"
+#include "entity_graph.h"
+#include "volume_inspector.h"
+#include "volume_style.h"
+#include "movement_lab.h"
+#include "level_state_bridge.h"
 static uint32_t gatherVisible(const GameCamera& camera,std::vector<Candidate>& visible) {
     visible.clear();
     ViewFilter filter(camera);
@@ -512,6 +569,7 @@ static uint32_t gatherVisible(const GameCamera& camera,std::vector<Candidate>& v
     const auto& nodes=runtimeRendering?(runtimeWorld?runtimeWorld->nodes:emptyNodes):spatialNodes;
     const auto& order=runtimeRendering?(runtimeWorld?runtimeWorld->order:emptyOrder):spatialOrder;
     const float selectionRadius=cullingRadius();
+    const ULONGLONG now=GetTickCount64();
     auto visit=[&](auto&& self,uint32_t index)->void {
         const SpatialNode& node=nodes[index];
         if(filter.distanceSquared(node.bounds)>selectionRadius*selectionRadius||!filter.inView(node.bounds)) return;
@@ -521,6 +579,7 @@ static uint32_t gatherVisible(const GameCamera& camera,std::vector<Candidate>& v
             const Mesh& mesh=source[order[i]];
             if(sceneTest()&&mesh.kind==0) continue;
             if((mesh.kind==0&&!showTriggers)||(mesh.kind==1&&!showCollision)) continue;
+            if(!volumeShown(mesh,now)||!triggerClassShown(mesh)) continue;
             float distance=filter.distanceSquared(mesh.bounds);
             if(distance<=selectionRadius*selectionRadius&&filter.inView(mesh.bounds)) visible.push_back({&mesh,distance,filter.screenDistanceSquared(mesh.bounds)});
         }
@@ -529,6 +588,7 @@ static uint32_t gatherVisible(const GameCamera& camera,std::vector<Candidate>& v
     const auto& live=runtimeRendering?(runtimeEntities?runtimeEntities->meshes:emptyMeshes):liveWalls.meshes;
     for(const Mesh& mesh:live) {
         if((mesh.kind==0&&!showTriggers)||(mesh.kind==2&&!showWalls)) continue;
+        if(!volumeShown(mesh,now)||!triggerClassShown(mesh)) continue;
         float distance=filter.distanceSquared(mesh.bounds);
         if(distance<=selectionRadius*selectionRadius&&filter.inView(mesh.bounds)) visible.push_back({&mesh,distance,filter.screenDistanceSquared(mesh.bounds)});
     }
@@ -557,15 +617,31 @@ static uint32_t collectVertices(const GameCamera& camera,std::vector<Vertex>& ou
     }
     static std::vector<Candidate> visible;
     uint32_t examined=gatherVisible(camera,visible);
+    InspectorHit selected;
+    const ULONGLONG now=GetTickCount64();
+    if(inspectVolumes&&!smokeTest()&&!sceneTest()&&!occlusionCase()) {
+        selected=pickInspectorVolume(camera,visible,radius);
+        InspectorPacket packet;
+        packet.level=runtimeLevel; packet.profile=currentGameProfile();
+        packet.base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        packet.updated=GetTickCount64(); packet.enabled=true; packet.distance=selected.distance;
+        if(selected.mesh) {
+            movementLab().aim(selected.mesh,runtimeLevel);
+            packet.entity=selected.mesh->entity;
+            packet.historicalGeometry=selected.mesh->historical; packet.geometryAt=selected.mesh->geometryAt;
+            packet.geometryState=selected.mesh->volumeState;
+        }
+        inspectorHud().publish(std::move(packet));
+    }
     // Prioritize geometry nearest the screen center, then nearer objects. The
     // GPU upload buffer grows on demand, so this ordering does not omit edges.
     sortVisibleCandidates(visible);
     uint32_t collisionTriangleVertices=0,collisionFilledMeshes=0;
     for(const Candidate& candidate:visible) {
         const Mesh* mesh=candidate.mesh;
-        if(!collisionMode) continue;
-        const std::array<float,4> color=mesh->kind==0?std::array<float,4>{0.15f,0.8f,1.0f,0.09f}:(mesh->kind==1?std::array<float,4>{0.25f,0.95f,0.12f,0.09f}:std::array<float,4>{1.0f,0.45f,0.05f,0.09f});
-        for(Vec3 point:mesh->geometry->triangles) append(mesh->world(point),color);
+        VolumeStyle style=volumeStyle(*mesh,mesh==selected.mesh,now);
+        if(!collisionMode||!style.filled) continue;
+        for(Vec3 point:mesh->geometry->triangles) append(mesh->world(point),style.fill);
         if(mesh->kind==1) { collisionTriangleVertices+=static_cast<uint32_t>(mesh->geometry->triangles.size()); ++collisionFilledMeshes; }
     }
     if(output.size()>std::numeric_limits<uint32_t>::max()) throw std::runtime_error("Visible collision fill exceeds Vulkan draw vertex count");
@@ -573,9 +649,32 @@ static uint32_t collectVertices(const GameCamera& camera,std::vector<Vertex>& ou
     uint32_t drawn[3]{},segments[3]{};
     for(const Candidate& candidate:visible) {
         const Mesh* mesh=candidate.mesh;
-        std::array<float,4> color=mesh->kind==0?std::array<float,4>{0.1f,0.85f,1.0f,0.9f}:(mesh->kind==1?std::array<float,4>{0.4f,1.0f,0.2f,0.65f}:std::array<float,4>{1.0f,0.45f,0.05f,0.9f});
-        for(Vec3 point:mesh->geometry->lines) append(mesh->world(point),color);
+        VolumeStyle style=volumeStyle(*mesh,mesh==selected.mesh,now);
+        const auto& lines=mesh->geometry->lines;
+        for(size_t i=0;i+1<lines.size();i+=2) {
+            Vec3 a=mesh->world(lines[i]),b=mesh->world(lines[i+1]);
+            if(!style.dashed) { append(a,style.line); append(b,style.line); }
+            else for(unsigned dash=0;dash<3;++dash) {
+                auto point=[&](float t) { return Vec3{a.x+(b.x-a.x)*t,a.y+(b.y-a.y)*t,a.z+(b.z-a.z)*t}; };
+                append(point(float(dash)*.4f),style.line); append(point(float(dash)*.4f+.2f),style.line);
+            }
+        }
         ++drawn[mesh->kind]; segments[mesh->kind]+=static_cast<uint32_t>(mesh->geometry->lines.size()/2);
+    }
+    if(showResearchPath&&runtimeRoute&&runtimeRoute->map==runtimeLevel.map&&runtimeRoute->world==runtimeLevel.world&&runtimeRoute->level==runtimeLevel.name) {
+        const auto& path=runtimeRoute->points; ViewFilter pathFilter(camera);
+        for(size_t i=1;i<path.size();++i) {
+            if(path[i-1].segment!=path[i].segment) continue;
+            Vec3 a=path[i-1].position,b=path[i].position; a.z+=.08f; b.z+=.08f;
+            float bounds[6]{std::min(a.x,b.x),std::min(a.y,b.y),std::min(a.z,b.z),std::max(a.x,b.x),std::max(a.y,b.y),std::max(a.z,b.z)};
+            if(pathFilter.distanceSquared(bounds)>cullingRadius()*cullingRadius()||!pathFilter.inView(bounds)) continue;
+            float age=float(i)/float(path.size()); std::array<float,4> color{.2f+.8f*age,.65f-.35f*age,1.f-.2f*age,.95f};
+            append(a,color); append(b,color);
+        }
+    }
+    if(!smokeTest()&&!sceneTest()&&!occlusionCase()&&motionProcess==GetCurrentProcessId()) appendMovementVertices(camera,output);
+    if(!smokeTest()&&!sceneTest()&&!occlusionCase()) {
+        auto highlight=levelStates().snapshot(); if(highlight) appendStateHighlight(camera,output,*highlight,runtimeLevel,encounterEpochMillis());
     }
     static ULONGLONG lastReport=0;
     if(output.size()>std::numeric_limits<uint32_t>::max()) throw std::runtime_error("Visible collision geometry exceeds Vulkan draw vertex count");
@@ -620,7 +719,7 @@ static bool draw(Swapchain& swap,VkQueue queue,uint32_t imageIndex,const VkPrese
     }
     DepthImage* screenDepth=chooseDepth(swap);
     if(!screenDepth) return false;
-    if(!smokeTest()&&!sceneTest()&&!occlusionCase()&&!updateRuntimeScene()) return false;
+    if(!smokeTest()&&!sceneTest()&&!occlusionCase()&&!runtimeLevel) return false;
     float consoleFraction=smokeTest()||sceneTest()||occlusionCase()?0.0f:readConsoleFraction(WallMemory{},gameBase,*profile);
     if(smokeTest()) { wchar_t value[32]{}; if(GetEnvironmentVariableW(L"DCV_TEST_CONSOLE_FRACTION",value,32)) consoleFraction=static_cast<float>(_wtof(value)); }
     uint32_t consoleTop=consoleClipTop(consoleFraction,swap.extent.height);
@@ -860,6 +959,24 @@ EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(VkQueue queue,const VkPr
     Device& data=*foundDevice->second;
     struct Boundary { DepthState& state; ~Boundary() { state.previousPresent=state.submitted; } } boundary{data.depth};
     updateViewerSettings();
+    if(!smokeTest()&&!sceneTest()&&!occlusionCase()) labConsole().connect();
+    if(!smokeTest()&&!sceneTest()&&!occlusionCase()) activeEncounters().connect();
+    if(!smokeTest()&&!sceneTest()&&!occlusionCase()&&showSupportHud.load()) supportPlaneHud().report();
+    if(!smokeTest()&&!sceneTest()&&!occlusionCase()) entityGraph().connect();
+    if(!smokeTest()&&!sceneTest()&&!occlusionCase()) levelStates().connect();
+    if(!smokeTest()&&!sceneTest()&&!occlusionCase()) movementLab().control(currentGameProfile(),motionProcess,showPlayerCollider,showMotionPaths,motionFollowTarget);
+    if(!smokeTest()&&!sceneTest()&&!occlusionCase()&&(enabled||recordResearch||showResearchPath)) updateRuntimeScene();
+    if(!smokeTest()&&!sceneTest()&&!occlusionCase()) {
+        if(!enabled||!inspectVolumes) inspectorHud().publish({});
+        else if(!inspectorHud().connect()) {
+            static ULONGLONG lastHudWarning=0;
+            if(GetTickCount64()-lastHudWarning>10000) {
+                note("Inspector HUD unavailable: load a game-compatible meathook XINPUT1_3.dll exporting mh_api_get. Volume highlighting remains available.");
+                lastHudWarning=GetTickCount64();
+            }
+        }
+        else inspectorHud().report();
+    }
     if(enabled&&foundQueue!=queues.end()&&present->swapchainCount==1) {
         auto found=swaps.find(present->pSwapchains[0]);
         uint32_t family=foundQueue->second.family;

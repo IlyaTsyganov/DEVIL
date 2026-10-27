@@ -114,7 +114,7 @@ struct RuntimeSceneBuilder {
 struct RuntimeEntities {
     LevelIdentity level;
     std::vector<Mesh> meshes;
-    uint32_t triggers=0,walls=0,unsupported=0;
+    uint32_t triggers=0,walls=0,unsupported=0,disabled=0,removed=0,unavailable=0,missingGeometry=0;
     double milliseconds=0;
 };
 // The Vulkan presentation thread only exchanges completed snapshots. All map
@@ -129,35 +129,54 @@ class RuntimeSceneManager {
     const GameProfile* requestedProfile=nullptr;
     uintptr_t base=0;
     WallMemory memory;
+    ResearchControl researchControl;
     std::shared_ptr<const RuntimeScene> world;
     std::shared_ptr<const RuntimeEntities> entities;
+    std::shared_ptr<const ResearchRoute> researchRoute;
     std::vector<std::shared_ptr<const RuntimeScene>> retired;
     void run() {
         uint64_t version=0; LevelIdentity level; uintptr_t image=0; bool built=false; const GameProfile* profile=nullptr;
         ULONGLONG retryAt=0;
         LiveWalls scanner; scanner.memory=memory;
+        TriggerClassDiscovery discovered;
+        TriggerPathDiscovery discoveredPaths;
+        ResearchSession research;
         while(!stopping.load()) {
+            ResearchControl control;
             std::vector<std::shared_ptr<const RuntimeScene>> garbage;
             {
                 std::unique_lock<std::mutex> lock(mutex);
                 wake.wait_for(lock,std::chrono::milliseconds(100),[&] { return stopping.load()||generation.load()!=version||!retired.empty(); });
                 if(stopping.load()) break;
                 garbage.swap(retired);
-                if(generation.load()!=version) { version=generation.load(); level=requested; image=base; profile=requestedProfile; built=false; retryAt=0; }
+                control=researchControl;
+                if(generation.load()!=version) { version=generation.load(); level=requested; image=base; profile=requestedProfile; built=false; retryAt=0; scanner.resetHistory(); }
             }
             garbage.clear();
-            if(!level||!profile) continue;
+            if(!profile) continue;
             try {
-                if(readLevelIdentity(memory,image,*profile)!=level) continue;
-                scanner.refresh(image,*profile,true);
+                auto actualLevel=readLevelIdentity(memory,image,*profile);
+                Vec3 playerPosition{};
+                bool sampling=actualLevel==level&&bool(level)&&gameplayVisible(memory,image,*profile)&&readResearchPosition(memory,image,*profile,playerPosition);
+                if(!level||actualLevel!=level) {
+                    research.update(control,0,0,"",nullptr,nullptr);
+                    std::lock_guard<std::mutex> lock(mutex); researchRoute=research.route(); continue;
+                }
+                scanner.refresh(image,*profile,true,true,true);
+                discovered.publish(scanner.observedTriggerClasses);
+                discoveredPaths.publish(scanner.observedTriggerPaths);
+                research.update(control,level.map,level.world,level.name,sampling?&playerPosition:nullptr,&scanner.meshes);
+                auto nextRoute=research.route();
                 auto next=std::make_shared<RuntimeEntities>(); next->level=level;
                 next->meshes.swap(scanner.meshes); next->triggers=scanner.triggers; next->walls=scanner.active;
                 next->unsupported=scanner.unsupported; next->milliseconds=scanner.milliseconds;
+                next->disabled=scanner.disabled; next->removed=scanner.removed; next->unavailable=scanner.unavailable; next->missingGeometry=scanner.missingGeometry;
                 if(readLevelIdentity(memory,image,*profile)!=level) continue;
                 {
                     std::lock_guard<std::mutex> lock(mutex);
                     if(generation.load()!=version) continue;
                     entities=std::move(next);
+                    researchRoute=std::move(nextRoute);
                 }
                 if(!built&&GetTickCount64()>=retryAt) {
                     RuntimeSceneBuilder builder; builder.memory=memory;
@@ -171,6 +190,7 @@ class RuntimeSceneManager {
                 }
             } catch(...) { retryAt=GetTickCount64()+2000; }
         }
+        research.finish();
     }
 public:
     RuntimeSceneManager()=default;
@@ -183,6 +203,8 @@ public:
         if(!worker.joinable()) { stopping=false; worker=std::thread([this] { run(); }); }
         wake.notify_one();
     }
+    void controlResearch(ResearchControl control) { std::lock_guard<std::mutex> lock(mutex); researchControl=std::move(control); }
+    std::shared_ptr<const ResearchRoute> route() { std::lock_guard<std::mutex> lock(mutex); return researchRoute; }
     void retire(std::shared_ptr<const RuntimeScene> old) {
         if(!old) return;
         std::lock_guard<std::mutex> lock(mutex); retired.push_back(std::move(old)); wake.notify_one();
@@ -196,17 +218,20 @@ public:
         stopping=true; ++generation; wake.notify_one();
         if(worker.joinable()) worker.join();
         world.reset(); entities.reset(); retired.clear(); requested={};
+        researchRoute.reset();
     }
 };
 static RuntimeSceneManager runtimeManager;
 static LevelIdentity runtimeLevel;
 static std::shared_ptr<const RuntimeScene> runtimeWorld;
 static std::shared_ptr<const RuntimeEntities> runtimeEntities;
+static std::shared_ptr<const ResearchRoute> runtimeRoute;
 static bool runtimeRendering=false;
 static bool updateRuntimeScene() {
     uintptr_t base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     const GameProfile* profile=currentGameProfile();
     if(!profile) return false;
+    runtimeManager.controlResearch({recordResearch,showResearchPath,researchProcess,researchReset,researchMarker,researchMarkerLabel});
     LevelIdentity level=readLevelIdentity(WallMemory{},base,*profile);
     runtimeRendering=true;
     if(level!=runtimeLevel) {
@@ -217,12 +242,13 @@ static bool updateRuntimeScene() {
     else if(level&&!runtimeWorld) runtimeManager.request(level,base,*profile);
     bool hadWorld=bool(runtimeWorld);
     runtimeManager.snapshot(level,runtimeWorld,runtimeEntities);
+    runtimeRoute=runtimeManager.route();
     if(!hadWorld&&runtimeWorld) {
         char message[800]; sprintf_s(message,"Runtime scene ready: %s, %zu player-blocking collision instances, %u unique geometries, %llu triangles, filtered non-blocking=%u, unsupported=%u, background build=%.1fms.",level.name.c_str(),runtimeWorld->meshes.size(),runtimeWorld->unique,runtimeWorld->triangles,runtimeWorld->nonBlocking,runtimeWorld->unsupported,runtimeWorld->milliseconds); note(message);
     }
     static ULONGLONG lastEntities=0;
     if(runtimeEntities&&GetTickCount64()-lastEntities>5000) {
-        char message[240]; sprintf_s(message,"Runtime entities: %u triggers, %u invisible walls, unsupported=%u, background scan=%.2fms.",runtimeEntities->triggers,runtimeEntities->walls,runtimeEntities->unsupported,runtimeEntities->milliseconds); note(message); lastEntities=GetTickCount64();
+        char message[340]; sprintf_s(message,"Runtime entities: %u active triggers, %u active invisible walls, disabled=%u removedSnapshots=%u unavailableSnapshots=%u missingCurrentGeometry=%u unsupportedActive=%u, background scan=%.2fms.",runtimeEntities->triggers,runtimeEntities->walls,runtimeEntities->disabled,runtimeEntities->removed,runtimeEntities->unavailable,runtimeEntities->missingGeometry,runtimeEntities->unsupported,runtimeEntities->milliseconds); note(message); lastEntities=GetTickCount64();
     }
     return bool(level)&&(runtimeWorld||runtimeEntities);
 }
