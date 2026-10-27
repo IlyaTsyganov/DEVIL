@@ -6,6 +6,9 @@ internal static class Program
     private static void Main()
     {
         ApplicationConfiguration.Initialize();
-        Application.Run(new MainForm());
+        using var form = new MainForm();
+        using var commands = new Game.LabCommandServer(form.ReceiveLabCommand);
+        Application.Run(form);
+        form.StopResearchOnExit();
     }
 }
